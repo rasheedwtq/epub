@@ -1,0 +1,21 @@
+# Runtime directories (outputs, cache, test data)
+out_pipeline/
+tests/
+work/
+docs/
+.env
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Hermes/WorkBuddy
+.workbuddy/

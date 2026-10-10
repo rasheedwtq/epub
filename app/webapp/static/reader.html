@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<title>docx2epub 阅读器（epub.js 实测）</title>
+<script src="/static/vendor/jszip.min.js"></script>
+<script src="/static/vendor/epub.min.js"></script>
+<style>
+:root{--bd:#d9d9d9;--ac:#137daf}
+*{box-sizing:border-box}
+body{font-family:"Microsoft YaHei",sans-serif;margin:0;background:#f7f7f8;color:#222}
+header{background:#fff;border-bottom:1px solid var(--bd);padding:10px 24px;display:flex;align-items:center;gap:12px}
+header h1{font-size:16px;margin:0;color:var(--ac)}
+select,button{padding:6px 12px;border:1px solid var(--bd);border-radius:4px;font-size:13px}
+button{background:var(--ac);color:#fff;border-color:var(--ac);cursor:pointer}
+.small{font-size:12px;color:#888}
+#viewer{width:100%;height:calc(100vh - 120px);border:1px solid var(--bd);border-radius:6px;background:#fff;overflow:hidden}
+main{padding:12px 24px;max-width:1100px;margin:0 auto}
+#meta{margin:8px 0;font-size:13px;color:#555}
+</style>
+</head>
+<body>
+<header>
+  <h1>epub.js 实测阅读器</h1>
+  <select id="bookSel" style="flex:1"><option value="">加载中…</option></select>
+  <button onclick="openBook()">打开</button>
+  <button onclick="prev()">‹ 上一页</button>
+  <button onclick="next()">下一页 ›</button>
+  <span id="info" class="small"></span>
+  <a href="/" class="small">← 返回配置中心</a>
+</header>
+<main>
+  <div id="viewer"></div>
+  <div id="meta">选择一本 A1′ 产物 EPUB 打开——验证 epub.js 平台内核的兼容性（切章/样式/图片/底纹/表格）。</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let book=null, rendition=null;
+async function init(){
+  const list=await (await fetch('/api/epubs')).json();
+  $('bookSel').innerHTML='<option value="">— 选择 EPUB —</option>'+
+    list.map(b=>`<option value="${b.url}">${b.book_id}</option>`).join('');
+  const want=new URLSearchParams(location.search).get('book');
+  const hit=want?list.find(b=>b.book_id===want):null;
+  if(hit){ $('bookSel').value=hit.url; openBook(hit.url); }
+  else if(list.length) openBook(list[0].url);
+}
+async function openBook(url){
+  url=url||$('bookSel').value; if(!url) return;
+  if(rendition){rendition.destroy(); rendition=null;}
+  $('info').textContent='解析中…';
+  try{
+    const steps=[];
+    const log=(m)=>{steps.push(m); $('info').textContent=steps.join(' | ');};
+    log('创建Book…');
+    book=ePub(url);
+    await book.opened; log('包已解析');
+    const md=await book.loaded.metadata;
+    const toc=(book.navigation&&book.navigation.toc)||[];
+    const nSpine=(book.spine&&(book.spine.items?book.spine.items.length:book.spine.length))||0;
+    log(`meta:${md.title} 目录${toc.length} spine${nSpine}`);
+    rendition=book.renderTo('viewer',{width:'100%',height:'100%',spread:'none',flow:'paginated'});
+    log('rendition建立');
+    await rendition.display();
+    log('display完成, iframe数:'+document.querySelectorAll('#viewer iframe').length);
+    rendition.on('rendered',(section)=>log('渲染节:'+section.href));
+    $('meta').textContent=`《${md.title}》 作者:${md.creator||'—'} · 目录 ${toc.length} 条 · spine ${nSpine} 章`;
+    $('info').textContent='渲染成功 ('+nSpine+' 章)';
+  }catch(e){
+    $('info').textContent='失败: '+e.message;
+    $('meta').textContent='渲染失败——详情见控制台。';
+  }
+}
+function next(){rendition&&rendition.next()}
+function prev(){rendition&&rendition.prev()}
+init();
+</script>
+</body>
+</html>

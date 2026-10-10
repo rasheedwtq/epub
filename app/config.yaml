@@ -1,0 +1,45 @@
+# docx2epub 管线配置（配置中心数据源；改动后 --stage 3 即可生效）
+paths:
+  soffice: C:\Program Files\LibreOffice\program\soffice.exe
+  workdir: work/pipeline
+
+surgery:            # 阶段1
+  tab_to_nbsp: true
+  math_hd: true     # Word COM 公式高清化（Word 不可用时自动回退 LO 低清）
+  shape_snap: true  # Word COM 整块截图：组合/含字浮动形状→一张图（小看板边框/小人/高亮全保留，Word 不可用回落 flatten 拆解）
+
+split:              # 阶段3 切章
+  heading_tag: h1
+  preamble_into_first: true
+
+styles:             # 阶段3 CSS 注入（配置中心"样式参数"块）
+  body_font: "宋体, SimSun, serif"
+  body_size: 1em
+  body_line_height: "1.9"
+  body_color: "#111"
+  h1_size: "1.6em"
+  h1_color: ""
+  h1_bold: true
+  h1_italic: false
+  h2_size: "1.4em"
+  h2_color: ""
+  h2_bold: true
+  h2_italic: false
+  h3_size: "1.5em"
+  h3_color: ""
+  h3_bold: true
+  h3_italic: false
+  table_border: "0.5pt solid #444"
+  img_max_width: 580   # 图片内联锁定宽度上限(px)：超过的转纯流式 max-width:100%，任何视口不溢出
+  img_optimize: true   # 图片压缩：大图降采样 + 不透明 PNG/GIF→JPEG（epub 瘦身，适合网览）
+  img_pixel_max: 1000  # 压缩后最大像素宽（1000 ≈ 580 显示宽的 1.7 倍，手机/半屏都够清晰）
+  img_jpeg_quality: 82 # JPEG 压缩质量（截图类 80~85 视觉无损）
+
+package:            # 组包（平台适配层参数位，等平台正式参数后启用）
+  epub_version: "2.0"
+  filename_style: keep    # 平台方 2026-10-09 确认：包内文件名无要求，中英文均可 → keep 为定案
+
+gates:              # 转换后闸门
+  l1_min: 100.0     # L1 字符覆盖率下限（%）
+  l2_strict: true   # L2 计数零差异
+  epubcheck: false  # 需 Java，M0 已验证 14/14 全绿，批量时按需开

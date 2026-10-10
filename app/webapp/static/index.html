@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<title>docx2epub 控制台</title>
+<style>
+:root{--bd:#d9d9d9;--bg:#f7f7f8;--ac:#137daf}
+*{box-sizing:border-box}
+body{font-family:"Microsoft YaHei",sans-serif;margin:0;background:var(--bg);color:#222}
+header{background:#fff;border-bottom:1px solid var(--bd);padding:10px 24px 0;display:flex;align-items:flex-end;gap:24px;flex-wrap:wrap}
+header h1{font-size:18px;margin:0 0 10px;color:var(--ac)}
+nav{display:flex;gap:2px}
+nav button{border:1px solid var(--bd);border-bottom:none;background:#eef1f3;color:#555;border-radius:6px 6px 0 0;padding:8px 18px;font-size:14px;cursor:pointer}
+nav button.on{background:#fff;color:var(--ac);font-weight:bold}
+.page{display:none;padding:16px 24px;max-width:1280px;margin:0 auto}
+.page.on{display:block}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.card{background:#fff;border:1px solid var(--bd);border-radius:8px;padding:16px}
+.card h2{font-size:15px;margin:0 0 12px;color:var(--ac);border-bottom:1px solid #eee;padding-bottom:8px}
+.stat{background:#fff;border:1px solid var(--bd);border-radius:8px;padding:14px;text-align:center}
+.stat b{font-size:26px;display:block;color:var(--ac)}
+.stat.ok b{color:#2a7}.stat.bad b{color:#c33}
+.stat span{font-size:12px;color:#777}
+.field{margin:10px 0;padding:8px 10px;border:1px solid #eee;border-radius:6px;background:#fcfcfd}
+.field.tint{border-left:3px solid var(--ac)}
+.field .row{display:flex;align-items:center;gap:8px;margin:0}
+.row{display:flex;align-items:center;gap:8px;margin:8px 0}
+.row label{width:150px;font-size:13px;color:#555}
+.row input,.row select{flex:1;padding:6px 8px;border:1px solid var(--bd);border-radius:4px;font-size:13px}
+.row input[type=text]{font-family:Consolas,monospace}
+.desc{font-size:12px;color:#777;margin-top:5px;line-height:1.55}
+.desc b{color:#444}
+button{padding:7px 16px;border:1px solid var(--ac);background:var(--ac);color:#fff;border-radius:4px;cursor:pointer;font-size:13px}
+button.ghost{background:#fff;color:var(--ac)}
+button.warn{background:#c33;border-color:#c33}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:hover:not(:disabled){opacity:.9}
+.toolbar{display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap}
+#msg{font-size:13px;color:#2a7;min-width:120px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+td,th{border:1px solid #eee;padding:5px 7px;text-align:left}
+th{background:#fafafa;color:#666}
+.st-done,.st-skipped{color:#2a7}.st-failed{color:#c33}.st-running{color:#d80;font-weight:bold}
+.st-pending,.st-canceled{color:#999}
+.small{font-size:12px;color:#888}
+.legend{font-size:12px;color:#666;background:#f2f7fa;border:1px solid #d8e8f0;border-radius:6px;padding:8px 10px;margin-top:12px;line-height:1.7}
+.legend b{color:var(--ac)}
+#batchLog{font-family:Consolas,monospace;font-size:12px;background:#1e2430;color:#cde;border-radius:6px;padding:10px;height:220px;overflow-y:auto;white-space:pre-wrap;line-height:1.6}
+.srcList{max-height:260px;overflow-y:auto;border:1px solid #eee;border-radius:6px;padding:6px}
+.srcList label{display:block;font-size:12px;padding:3px 4px;cursor:pointer;border-radius:3px}
+.srcList label:hover{background:#f0f6fa}
+progress{width:100%;height:16px}
+iframe{width:100%;height:720px;border:1px solid var(--bd);border-radius:8px;background:#fff}
+</style>
+</head>
+<body>
+<header>
+  <h1>docx2epub 控制台</h1>
+  <nav>
+    <button data-p="dash" class="on">仪表盘</button>
+    <button data-p="conv">转换控制台</button>
+    <button data-p="qc">质检面板</button>
+    <button data-p="cfg">配置中心</button>
+    <button data-p="read">试读</button>
+  </nav>
+</header>
+
+<!-- ============ 仪表盘 ============ -->
+<div class="page on" id="p_dash">
+  <div class="grid4" id="statCards"></div>
+  <div class="grid2">
+    <div class="card">
+      <h2>输入构成 / 异常</h2>
+      <table><thead><tr><th>输入类型</th><th>本数</th></tr></thead><tbody id="fmtBody"></tbody></table>
+      <h2 style="margin-top:14px">失败清单</h2>
+      <table><thead><tr><th>book_id</th><th>错误</th></tr></thead><tbody id="failBody"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>最近任务</h2>
+      <table><thead><tr><th>book_id</th><th>状态</th><th>L1/L2</th><th>耗时</th><th>时间</th></tr></thead><tbody id="recentBody"></tbody></table>
+      <div class="legend"><b>状态含义：</b><span class="st-done">done</span>=转换完成且闸门全过；<span class="st-failed">failed</span>=转换失败或闸门未过（原因见错误列）；<span class="st-skipped">skipped</span>=断点续跑时跳过的已完成项。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 转换控制台 ============ -->
+<div class="page" id="p_conv">
+  <div class="grid2">
+    <div class="card">
+      <h2>① 选择输入</h2>
+      <div class="row" style="margin-top:0">
+        <label style="width:auto">目录模式：</label>
+        <input id="scanDir" type="text" placeholder="输入目录路径，如 D:\books\待转换" style="flex:1;font-family:Consolas,monospace"/>
+        <button class="ghost" onclick="scanDirFn()">扫描</button>
+      </div>
+      <div class="desc" id="scanInfo" style="margin:4px 0 8px">不填就用下面的样本库清单；填了目录点扫描，目录（含子目录）里所有 docx/doc/rtf/docm 会替换下方清单。</div>
+      <div class="row">
+        <label style="width:auto">输出目录：</label>
+        <input id="outDir" type="text" placeholder="EPUB 平铺输出到此目录" style="flex:1;font-family:Consolas,monospace"/>
+        <label class="small"><input type="checkbox" id="outSame" checked onchange="outDirSync()"/> 跟随输入目录</label>
+      </div>
+      <div class="desc" style="margin:4px 0 8px">EPUB <b>直接平铺</b>输出（不建每本子文件夹），文件名「转换_&lt;book_id&gt;.epub」；勾「跟随输入目录」时自动填扫描目录，不勾可手填任意目录。</div>
+      <div class="toolbar" style="margin:0 0 8px">
+        <button class="ghost" onclick="selAll(true)">全选</button>
+        <button class="ghost" onclick="selAll(false)">全不选</button>
+        <input id="filterTxt" type="text" placeholder="过滤文件名…" style="width:160px" oninput="renderList()"/>
+        <label class="small"><input type="checkbox" id="skipDone" checked/> 断点续跑（跳过已完成的书）</label>
+      </div>
+      <div class="srcList" id="srcList">加载中…</div>
+      <div class="toolbar">
+        <button id="btnStart" onclick="batchStart()">▶ 启动转换</button>
+        <button id="btnCancel" class="warn" onclick="batchCancel()" disabled>■ 取消批次</button>
+        <span id="batchMsg" class="small"></span>
+      </div>
+      <div class="legend"><b>目录模式：</b>扫描递归子目录，同名文件（不同子目录）自动加 ~序号 区分，不会互相覆盖。<br/><b>输出布局：</b>EPUB 平铺进输出目录，评分卡在 <code>work/pipeline/&lt;book_id&gt;/任务.json</code>，输出目录不再被每本一个的子文件夹刷屏。<br/><b>断点续跑：</b>勾上时，已完成 <span class="st-done">done</span> 的书自动跳过，只补漏和重做失败项。<br/><b>取消机制：</b>强杀当前转换进程树（含 LO 子进程），已转完的保留。</div>
+    </div>
+    <div class="card">
+      <h2>② 进度与日志</h2>
+      <progress id="prog" value="0" max="1"></progress>
+      <div class="small" id="progTxt">—</div>
+      <table style="margin-top:10px"><thead><tr><th>book_id</th><th>状态</th><th>摘要</th></tr></thead>
+      <tbody id="itemBody"><tr><td colspan="3" class="small">—</td></tr></tbody></table>
+      <div id="batchLog">等待任务…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 质检面板 ============ -->
+<div class="page" id="p_qc">
+  <div class="card">
+    <h2>评分卡（每本一行 · 闸门结果来自「任务.json」）</h2>
+    <div class="toolbar" style="margin:0 0 10px">
+      <select id="qcFilter" onchange="loadScores()">
+        <option value="">全部</option>
+        <option value="failed">只看失败</option>
+        <option value="done">只看通过</option>
+      </select>
+      <button class="ghost" onclick="loadScores()">刷新</button>
+      <span class="small">L1=文字保真覆盖率(%) · L2=图片/表格结构对账 · 点「试读」用平台同款内核开卷</span>
+    </div>
+    <table><thead><tr><th>book_id</th><th>状态</th><th>L1(%)</th><th>L2</th><th>章</th><th>图</th><th>耗时</th><th>EPUB</th><th>错误/摘要</th><th></th></tr></thead>
+    <tbody id="scoreBody"></tbody></table>
+  </div>
+</div>
+
+<!-- ============ 配置中心（原有模块） ============ -->
+<div class="page" id="p_cfg">
+  <div class="grid2">
+    <div class="card">
+      <h2>样式参数（阶段3 注入 CSS）</h2>
+      <div id="styleFields"></div>
+      <h2 style="margin-top:18px">质检闸门阈值</h2>
+      <div id="gateFields"></div>
+      <h2 style="margin-top:18px">组包参数</h2>
+      <div id="pkgFields"></div>
+      <div class="toolbar">
+        <button onclick="saveCfg()">保存配置</button>
+        <select id="verSel" onchange=""><option value="">— 版本 —</option></select>
+        <button class="ghost" onclick="rollback()">回滚到选中版本</button>
+        <span id="msg"></span>
+      </div>
+      <div class="legend">
+        <b>闸门是什么：</b>每本书转换完成后自动做的体检，不过线整本书标记 <span class="st-failed">failed</span>，过线为 <span class="st-done">done</span>。评分卡在 <code>work/pipeline/&lt;book_id&gt;/任务.json</code>，EPUB 位置见转换控制台的输出目录设定。
+      </div>
+    </div>
+    <div class="card">
+      <h2>单本重跑</h2>
+      <div class="row">
+        <select id="sampleSel" style="flex:1"><option value="">加载中…</option></select>
+        <button onclick="run(3)">重跑阶段3</button>
+        <button class="ghost" onclick="run('all')">全量重跑</button>
+      </div>
+      <div class="desc">· <b>重跑阶段3</b>（秒级）——改完样式/阈值后用这个，样式改动即时生效。<br/>· <b>全量重跑</b>（约1分钟）——动了源文档或手术类设置后用。</div>
+      <div id="lastRun" class="small"></div>
+      <div class="legend">
+        <b>转换三阶段：</b><br/>
+        <b>阶段1</b> docx 前置手术——公式转高清图片、Tab 处理、坏文件预检；<br/>
+        <b>阶段2</b> LibreOffice 把 docx 转成 HTML（图表/文本框在此栅格化成图片）；<br/>
+        <b>阶段3</b> 清理 HTML → 按 h1 切章 → 注入本页配置的样式 → 组包（默认 EPUB2）。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 试读 ============ -->
+<div class="page" id="p_read">
+  <div class="card" style="margin-bottom:12px">
+    <div class="row" style="margin:0">
+      <label style="width:auto">选书：</label>
+      <select id="readSel" style="flex:1" onchange="$('readFrame').src='/reader?book='+encodeURIComponent(this.value)"></select>
+      <button class="ghost" onclick="window.open('/reader?book='+encodeURIComponent($('readSel').value))">新窗口打开</button>
+    </div>
+  </div>
+  <iframe id="readFrame" src="/reader"></iframe>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+async function j(url,opt){const r=await fetch(url,opt);return r.json()}
+
+/* ---------- 页签 ---------- */
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
+  document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); $('p_'+b.dataset.p).classList.add('on');
+  if(b.dataset.p==='dash') loadDash();
+  if(b.dataset.p==='qc') loadScores();
+});
+
+/* ---------- 参数字典（配置中心） ---------- */
+const STYLE_FIELDS=[
+ {k:'body_font',label:'正文字体',type:'text',block:'styles',
+  desc:'正文段落的字体族（CSS font-family），如 <b>"Noto Sans SC"</b> 或 <b>"SimSun"</b>。读者设备没有这个字体时会自动回退到阅读器默认字体，不会出现乱码。'},
+ {k:'body_size',label:'正文字号',type:'text',block:'styles',
+  desc:'正文基准字号（CSS font-size），<b>1em</b> = 阅读器默认字号（推荐，跟随读者设置缩放）。也可写 12pt 等固定值，但会失去缩放跟随。'},
+ {k:'body_line_height',label:'正文行距',type:'text',block:'styles',
+  desc:'正文行高倍数（CSS line-height，<b>无单位数字</b>）。1.7 = 行高是字号的 1.7 倍。建议 1.5~2.0，越大越疏朗。改完重跑阶段3 即生效。'},
+ {k:'body_color',label:'正文颜色',type:'color',block:'styles',
+  desc:'正文文字颜色。建议深色（#111~#333），<b>别用纯黑 #000</b>——浅灰底/深色主题阅读器上观感更柔和。留空 = 默认 #111。'},
+ {k:'img_max_width',label:'图片锁定宽度上限(px)',type:'text',block:'styles',
+  desc:'图片内联锁定宽度的上限（像素，默认 <b>580</b> ≈ A4 版心宽）。≤此值的图片锁定显示宽度；超过的转纯流式（max-width:100%，随窗口自适应缩放）。所有图都带 max-width:100% 内联兜底，<b>任何视口都不会溢出</b>。改完重跑阶段3 即生效。'},
+ {k:'img_pixel_max',label:'图片压缩像素上限(px)',type:'text',block:'styles',
+  desc:'超过此<b>像素宽度</b>的原图等比降采样到该值（默认 <b>1000</b>，约为显示宽的 1.7 倍，手机/半屏屏都够清晰）。打印级大图在这里被压成网览尺寸，epub 体积显著变小。改完需全量重跑。'},
+ {k:'img_jpeg_quality',label:'JPEG 压缩质量',type:'text',block:'styles',
+  desc:'不透明 PNG/GIF 转 JPEG 的质量（默认 <b>82</b>，截图类 80~85 视觉无损，体积省一半以上）。带透明度的图自动保留原格式不走 JPEG。'},
+ {k:'h1_size',label:'一级标题（章）字号',type:'text',block:'styles',
+  desc:'<b>h1 = 文档的最高级标题，切章就认它</b>——每个 h1 段落被拆成 EPUB 的一章，对应 Word 里的「标题1」样式或独占一行的大标题。单位 em（1em=正文字号），建议 1.5~1.8。'},
+ {k:'h1_color',label:'一级标题颜色',type:'color',block:'styles',
+  desc:'章标题文字颜色，如 <b>#8B0000</b>（深红）。留空 = 阅读器默认（黑）。内网品牌色也可以在这里统一。'},
+ {k:'h1_bold',label:'一级标题加粗',type:'bool',block:'styles',
+  desc:'章标题是否加粗。默认<b>开</b>；关掉后标题与正文粗细一致，纯靠字号区分层级。'},
+ {k:'h1_italic',label:'一级标题斜体',type:'bool',block:'styles',
+  desc:'章标题是否斜体。中文斜体是仿宋化的伪斜体，观感因阅读器而异，<b>一般不建议开</b>；英文书名类标题可用。'},
+ {k:'h2_size',label:'二级标题（节）字号',type:'text',block:'styles',
+  desc:'章内的小节标题，对应 Word「标题2」样式。单位 em，建议 1.2~1.4，必须小于 h1 才有层级感。'},
+ {k:'h2_color',label:'二级标题颜色',type:'color',block:'styles',desc:'节标题文字颜色。留空 = 默认。'},
+ {k:'h2_bold',label:'二级标题加粗',type:'bool',block:'styles',desc:'节标题是否加粗，默认<b>开</b>。'},
+ {k:'h2_italic',label:'二级标题斜体',type:'bool',block:'styles',desc:'节标题是否斜体，默认<b>关</b>。'},
+ {k:'h3_size',label:'三级标题字号',type:'text',block:'styles',
+  desc:'更低层级的标题，对应 Word「标题3」样式。单位 em，建议 1.1~1.2。三层以内的标题层级 EPUB 目录都能正常显示。'},
+ {k:'h3_color',label:'三级标题文字颜色',type:'color',block:'styles',desc:'三级标题文字颜色。留空 = 默认。'},
+ {k:'h3_bold',label:'三级标题加粗',type:'bool',block:'styles',desc:'三级标题是否加粗，默认<b>开</b>。'},
+ {k:'h3_italic',label:'三级标题斜体',type:'bool',block:'styles',desc:'三级标题是否斜体，默认<b>关</b>。'},
+ {k:'table_border',label:'表格边框',type:'text',block:'styles',
+  desc:'表格单元格边框（CSS border 简写），如 <b>1px solid #999</b>（1像素灰色实线）。<b>none</b> = 去掉所有边框。宽表自动拉伸到页宽，不用在这里设置宽度。'}
+];
+const GATE_FIELDS=[
+ {k:'l1_min',label:'L1 覆盖率下限(%)',type:'number',block:'gates',
+  desc:'文字保真闸门：源文档的文字在成品 EPUB 里的<b>字符覆盖率</b>必须 ≥ 此值，否则整本书标记 failed。100 = 要求一字不丢（公式图、表格里的文字不算丢失，按结构项单独核对）。'},
+ {k:'l2_strict',label:'L2 结构严格模式',type:'bool',block:'gates',
+  desc:'结构对账闸门：核对成品的<b>图片数、表格数</b>与源文档是否一张不差。<b>true</b>=不一致即 failed；<b>false</b>=只在任务记录里标注差异，不判失败。'},
+ {k:'epubcheck',label:'EPUBCheck 合规闸门',type:'bool',block:'gates',
+  desc:'转换完成后是否运行 <b>EPUBCheck</b>（EPUB 官方标准校验器）并把结果计入任务记录。true=运行；false=跳过（省约2秒/本）。注意：这只影响记录，不参与 failed 判定。'}
+];
+const PKG_FIELDS=[
+ {k:'epub_version',label:'EPUB 版本',type:'enum',options:['2.0','3.0'],block:'package',
+  desc:'组包格式。<b>2.0</b>=平台当前口径（内核 epub.js 已实测兼容，目录走 toc.ncx）；<b>3.0</b>=带 nav.xhtml 双导航的超集。改完需重跑阶段3。'},
+ {k:'filename_style',label:'包内文件名风格',type:'enum',options:['keep'],block:'package',
+  desc:'zip 包内章节/图片文件名。<b>keep</b>=保留原名。<b>平台方 2026-10-09 已确认：文件名无任何要求，中英文均可</b>，keep 为定案，无需转换。'}
+];
+function fieldHtml(f){
+  const inner = f.type==='bool'
+    ? `<div class="row"><label>${f.label}</label><select id="b_${f.k}"><option value="true">开（true）</option><option value="false">关（false）</option></select></div>`
+    : f.type==='enum'
+    ? `<div class="row"><label>${f.label}</label><select id="e_${f.k}">${f.options.map(o=>`<option>${o}</option>`).join('')}</select></div>`
+    : f.type==='color'
+    ? `<div class="row"><label>${f.label}</label><input id="s_${f.k}" placeholder="如 #8B0000，留空=默认"/></div>`
+    : `<div class="row"><label>${f.label}</label><input id="s_${f.k}" type="${f.type}"/></div>`;
+  const cls = f.type==='color' ? 'field tint' : 'field';
+  return `<div class="${cls}">${inner}<div class="desc">${f.desc}</div></div>`;
+}
+$('styleFields').innerHTML=STYLE_FIELDS.map(fieldHtml).join('');
+$('gateFields').innerHTML=GATE_FIELDS.map(fieldHtml).join('');
+$('pkgFields').innerHTML=PKG_FIELDS.map(fieldHtml).join('');
+const ALL_FIELDS=[...STYLE_FIELDS,...GATE_FIELDS,...PKG_FIELDS];
+function fill(cfg){
+  ALL_FIELDS.forEach(f=>{
+    const v = f.block==='styles' ? cfg.styles[f.k] : f.block==='gates' ? cfg.gates[f.k] : (cfg.package||{})[f.k];
+    if(f.type==='bool') $('b_'+f.k).value=String(v===undefined?false:v);
+    else if(f.type==='enum') $('e_'+f.k).value=String(v??f.options[0]);
+    else $('s_'+f.k).value=v??'';
+  });
+}
+
+/* ---------- 配置中心逻辑 ---------- */
+async function saveCfg(){
+  const cfg=await j('/api/config');
+  if(!cfg.package) cfg.package={};
+  ALL_FIELDS.forEach(f=>{
+    const tgt = f.block==='styles' ? cfg.styles : f.block==='gates' ? cfg.gates : cfg.package;
+    if(f.type==='bool') tgt[f.k]=$('b_'+f.k).value==='true';
+    else if(f.type==='enum') tgt[f.k]=$('e_'+f.k).value;
+    else if(f.k==='l1_min') tgt[f.k]=parseFloat($('s_l1_min').value)||100;
+    else tgt[f.k]=$('s_'+f.k).value;
+  });
+  const r=await j('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+  $('msg').textContent='已保存（版本 '+r.snapshot+'）';
+  const vs=await j('/api/versions');
+  $('verSel').innerHTML='<option value="">— 版本 —</option>'+vs.map(v=>`<option>${v}</option>`).join('');
+  setTimeout(()=>$('msg').textContent='',4000);
+}
+async function rollback(){
+  const v=$('verSel').value; if(!v) return $('msg').textContent='先选版本';
+  const r=await j('/api/rollback/'+v,{method:'POST'});
+  if(r.ok){$('msg').textContent='已回滚 '+r.restored;fill(await j('/api/config'));}
+  else $('msg').textContent='回滚失败';
+  setTimeout(()=>$('msg').textContent='',4000);
+}
+async function run(stage){
+  const book_id=$('sampleSel').value; if(!book_id) return;
+  $('lastRun').textContent='执行中…（'+book_id+' stage='+stage+'）';
+  const r=await j('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({book_id,stage})});
+  const g=r.gate_l1l2||{};
+  $('lastRun').innerHTML=`状态 <b class="st-${r.status}">${r.status}</b> · L1=${g.l1??'-'}% · L2=${g.l2??'-'} · 耗时 ${r.elapsed_s}s`;
+}
+
+/* ---------- 仪表盘 ---------- */
+async function loadDash(){
+  const s=await j('/api/stats');
+  const bs=s.by_status||{};
+  $('statCards').innerHTML=`
+    <div class="stat"><b>${s.total}</b><span>累计任务（去重）</span></div>
+    <div class="stat ok"><b>${bs.done||0}</b><span>done 通过</span></div>
+    <div class="stat bad"><b>${bs.failed||0}</b><span>failed 失败</span></div>
+    <div class="stat"><b>${s.avg_elapsed}s</b><span>平均耗时/本</span></div>`;
+  $('fmtBody').innerHTML=Object.entries(s.input_fmt||{}).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  $('failBody').innerHTML=(s.fails||[]).map(f=>`<tr><td>${f.book_id}</td><td class="st-failed">${f.err}</td></tr>`).join('')||'<tr><td colspan="2" class="small">无失败</td></tr>';
+  $('recentBody').innerHTML=(s.recent||[]).map(t=>{
+    const g=t.gate_l1l2||{};
+    return `<tr><td>${t.book_id}</td><td class="st-${t.status}">${t.status}</td><td>${g.l1??''}${g.l2?' / '+g.l2:''}</td><td>${t.elapsed_s??''}s</td><td>${t.ts||''}</td></tr>`;
+  }).join('');
+}
+
+/* ---------- 转换控制台 ---------- */
+let FILES=[];   // 统一清单：{src, book_id, display}
+let ROOT_INFO={};
+function outDirSync(){
+  const same=$('outSame').checked;
+  $('outDir').readOnly=same;
+  $('outDir').value = same ? (($('scanDir').value.trim())||ROOT_INFO.default_out||'') : $('outDir').value;
+}
+async function loadSrcs(){
+  const ss=await j('/api/samples');
+  FILES=ss.map(s=>({src:s.src, book_id:s.book_id, display:s.book_id}));
+  renderList();
+  $('readSel').innerHTML='<option value="">— 选择 EPUB —</option>'+ss.map(s=>`<option>${s.book_id}</option>`).join('');
+}
+async function scanDirFn(){
+  const d=$('scanDir').value.trim(); if(!d) return;
+  $('scanInfo').textContent='扫描中…';
+  const r=await j('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dir:d})});
+  if(!r.ok){$('scanInfo').textContent=r.err;return}
+  FILES=r.files.map(f=>({src:f.src, book_id:f.book_id, display:f.rel+(f.size_kb>=0?`（${f.size_kb}KB）`:'')}));
+  let info=`扫描到 ${r.total} 个 Word 文件`;
+  if(r.truncated) info+=`（清单只显示前 ${r.files.length} 个）`;
+  const dn=Object.keys(r.duplicate_names||{});
+  if(dn.length) info+=` · ⚠ 同名文件 ${dn.length} 组将自动加 ~序号 区分`;
+  $('scanInfo').innerHTML=info;
+  outDirSync();
+  renderList();
+}
+function renderList(){
+  const kw=($('filterTxt').value||'').toLowerCase();
+  const list=FILES.filter(f=>!kw||f.display.toLowerCase().includes(kw));
+  $('srcList').innerHTML=list.map((f)=>`<label><input type="checkbox" class="srcChk" data-src="${encodeURIComponent(f.src)}" data-bid="${encodeURIComponent(f.book_id)}"/> ${f.display}</label>`).join('')
+    ||'<span class="small">无匹配文件</span>';
+}
+function selAll(v){document.querySelectorAll('.srcChk').forEach(c=>c.checked=v)}
+async function batchStart(){
+  const srcs=[...document.querySelectorAll('.srcChk:checked')].map(c=>({
+    src:decodeURIComponent(c.dataset.src), book_id:decodeURIComponent(c.dataset.bid)}));
+  if(!srcs.length) return $('batchMsg').textContent='先勾选要转换的书';
+  const outDir=($('outSame').checked?($('scanDir').value.trim()||''):($('outDir').value.trim()||''));
+  const r=await j('/api/batch/start',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({srcs,skip_done:$('skipDone').checked,out_dir:outDir})});
+  if(!r.ok) return $('batchMsg').textContent=r.err||'启动失败';
+  $('batchMsg').textContent=`已提交 ${r.total} 本`;
+  $('btnStart').disabled=true; $('btnCancel').disabled=false;
+  pollBatch();
+}
+async function batchCancel(){
+  await j('/api/batch/cancel',{method:'POST'});
+  $('batchMsg').textContent='取消中…';
+}
+let polling=null;
+async function pollBatch(){
+  if(polling) return; polling=setInterval(async()=>{
+    const s=await j('/api/batch/status');
+    const p=s.progress;
+    $('prog').max=p.total||1; $('prog').value=p.done+p.failed;
+    $('progTxt').textContent=`${p.done+p.failed}/${p.total}（完成 ${p.done} · 失败 ${p.failed}）· 批次 ${s.started||'—'} → ${s.finished||'进行中'}`;
+    $('itemBody').innerHTML=s.items.map(i=>`<tr><td>${i.book_id}</td><td class="st-${i.status}">${i.status}</td><td class="small">${i.summary||''}</td></tr>`).join('');
+    $('batchLog').textContent=s.logs.join('\n');
+    $('batchLog').scrollTop=$('batchLog').scrollHeight;
+    if(!s.running){
+      clearInterval(polling); polling=null;
+      $('btnStart').disabled=false; $('btnCancel').disabled=true;
+      $('batchMsg').textContent='批次结束';
+    }
+  },1500);
+}
+
+/* ---------- 质检面板 ---------- */
+async function loadScores(){
+  const f=$('qcFilter').value;
+  const rows=await j('/api/scores');
+  const list=rows.filter(r=>!f||r.status===f);
+  $('scoreBody').innerHTML=list.map(r=>`
+    <tr><td>${r.book_id}</td><td class="st-${r.status}">${r.status}</td>
+    <td>${r.l1??'—'}</td><td>${r.l2??'—'}</td><td>${r.sections??'—'}</td><td>${r.imgs??'—'}</td>
+    <td>${r.elapsed??'—'}s</td><td>${r.epub?'有':'无'}</td>
+    <td class="small ${r.status==='failed'?'st-failed':''}">${r.err||''}</td>
+    <td>${r.epub?`<button class="ghost" onclick="openReader('${r.book_id}')">试读</button>`:''}</td></tr>`).join('')
+    ||'<tr><td colspan="10" class="small">无记录</td></tr>';
+}
+function openReader(bid){
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.p==='read'));
+  document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));
+  $('p_read').classList.add('on');
+  $('readSel').value=bid;
+  $('readFrame').src='/reader?book='+encodeURIComponent(bid);
+}
+
+/* ---------- 初始化 ---------- */
+(async function init(){
+  fill(await j('/api/config'));
+  const vs=await j('/api/versions');
+  $('verSel').innerHTML='<option value="">— 版本 —</option>'+vs.map(v=>`<option>${v}</option>`).join('');
+  ROOT_INFO=await j('/api/root');
+  outDirSync();
+  await loadSrcs();
+  await loadDash();
+})();
+</script>
+</body>
+</html>
