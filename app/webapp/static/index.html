@@ -52,49 +52,43 @@ th{background:#fafafa;color:#666}
 .srcList label:hover{background:#f0f6fa}
 progress{width:100%;height:16px}
 iframe{width:100%;height:720px;border:1px solid var(--bd);border-radius:8px;background:#fff}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:50}
+.overlay.on{display:flex}
+.modal{background:#fff;border-radius:10px;width:640px;max-width:92vw;max-height:84vh;display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+.modal>header{background:#fff;border-bottom:1px solid var(--bd);padding:12px 16px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.modal>header b{color:var(--ac);font-size:14px}
+.modal .body{padding:10px 16px;overflow:auto;min-height:160px}
+.modal .foot{padding:10px 16px;border-top:1px solid var(--bd);display:flex;gap:8px;justify-content:flex-end}
+.dirRow{font-family:Consolas,monospace;font-size:13px;padding:5px 8px;border-radius:5px;cursor:pointer;display:flex;align-items:center;gap:6px}
+.dirRow:hover{background:#f0f6fa}
+.dirRow .ico{color:var(--ac)}
+.fileRow{font-family:Consolas,monospace;font-size:13px;padding:5px 8px;color:#aaa}
+.pickPath{font-family:Consolas,monospace;font-size:13px;padding:6px 8px;border:1px solid var(--bd);border-radius:4px;flex:1;min-width:200px}
 </style>
 </head>
 <body>
 <header>
   <h1>docx2epub 控制台</h1>
   <nav>
-    <button data-p="dash" class="on">仪表盘</button>
-    <button data-p="conv">转换控制台</button>
+    <button data-p="conv" class="on">转换控制台</button>
     <button data-p="qc">质检面板</button>
     <button data-p="cfg">配置中心</button>
     <button data-p="read">试读</button>
   </nav>
 </header>
 
-<!-- ============ 仪表盘 ============ -->
-<div class="page on" id="p_dash">
-  <div class="grid4" id="statCards"></div>
-  <div class="grid2">
-    <div class="card">
-      <h2>输入构成 / 异常</h2>
-      <table><thead><tr><th>输入类型</th><th>本数</th></tr></thead><tbody id="fmtBody"></tbody></table>
-      <h2 style="margin-top:14px">失败清单</h2>
-      <table><thead><tr><th>book_id</th><th>错误</th></tr></thead><tbody id="failBody"></tbody></table>
-    </div>
-    <div class="card">
-      <h2>最近任务</h2>
-      <table><thead><tr><th>book_id</th><th>状态</th><th>L1/L2</th><th>耗时</th><th>时间</th></tr></thead><tbody id="recentBody"></tbody></table>
-      <div class="legend"><b>状态含义：</b><span class="st-done">done</span>=转换完成且闸门全过；<span class="st-failed">failed</span>=转换失败或闸门未过（原因见错误列）；<span class="st-skipped">skipped</span>=断点续跑时跳过的已完成项。</div>
-    </div>
-  </div>
-</div>
-
 <!-- ============ 转换控制台 ============ -->
-<div class="page" id="p_conv">
+<div class="page on" id="p_conv">
   <div class="grid2">
     <div class="card">
       <h2>① 选择输入</h2>
       <div class="row" style="margin-top:0">
         <label style="width:auto">目录模式：</label>
-        <input id="scanDir" type="text" placeholder="输入目录路径，如 D:\books\待转换" style="flex:1;font-family:Consolas,monospace"/>
-        <button class="ghost" onclick="scanDirFn()">扫描</button>
+        <input id="scanDir" type="text" placeholder="点右边按钮选文件夹，或手填路径" style="flex:1;font-family:Consolas,monospace"/>
+        <button class="ghost" onclick="pickScanDir()">📂 打开文件夹并扫描</button>
+        <button class="ghost" onclick="openWebPicker('scan')">🌐 浏览器内选目录</button>
       </div>
-      <div class="desc" id="scanInfo" style="margin:4px 0 8px">不填就用下面的样本库清单；填了目录点扫描，目录（含子目录）里所有 docx/doc/rtf/docm 会替换下方清单。</div>
+      <div class="desc" id="scanInfo" style="margin:4px 0 8px">点「打开文件夹并扫描」弹系统文件夹选择框，选中后自动扫描（含子目录）所有 docx/doc/rtf/docm 替换下方清单；也可以手填路径后点按钮。</div>
       <div class="row">
         <label style="width:auto">输出目录：</label>
         <input id="outDir" type="text" placeholder="EPUB 平铺输出到此目录" style="flex:1;font-family:Consolas,monospace"/>
@@ -161,23 +155,8 @@ iframe{width:100%;height:720px;border:1px solid var(--bd);border-radius:8px;back
         <span id="msg"></span>
       </div>
       <div class="legend">
-        <b>闸门是什么：</b>每本书转换完成后自动做的体检，不过线整本书标记 <span class="st-failed">failed</span>，过线为 <span class="st-done">done</span>。评分卡在 <code>work/pipeline/&lt;book_id&gt;/任务.json</code>，EPUB 位置见转换控制台的输出目录设定。
-      </div>
-    </div>
-    <div class="card">
-      <h2>单本重跑</h2>
-      <div class="row">
-        <select id="sampleSel" style="flex:1"><option value="">加载中…</option></select>
-        <button onclick="run(3)">重跑阶段3</button>
-        <button class="ghost" onclick="run('all')">全量重跑</button>
-      </div>
-      <div class="desc">· <b>重跑阶段3</b>（秒级）——改完样式/阈值后用这个，样式改动即时生效。<br/>· <b>全量重跑</b>（约1分钟）——动了源文档或手术类设置后用。</div>
-      <div id="lastRun" class="small"></div>
-      <div class="legend">
-        <b>转换三阶段：</b><br/>
-        <b>阶段1</b> docx 前置手术——公式转高清图片、Tab 处理、坏文件预检；<br/>
-        <b>阶段2</b> LibreOffice 把 docx 转成 HTML（图表/文本框在此栅格化成图片）；<br/>
-        <b>阶段3</b> 清理 HTML → 按 h1 切章 → 注入本页配置的样式 → 组包（默认 EPUB2）。
+        <b>闸门是什么：</b>每本书转换完成后自动做的体检，不过线整本书标记 <span class="st-failed">failed</span>，过线为 <span class="st-done">done</span>。评分卡在 <code>work/pipeline/&lt;book_id&gt;/任务.json</code>，EPUB 位置见转换控制台的输出目录设定。<br/>
+        <b>转换三阶段：</b><b>阶段1</b> docx 前置手术——公式转高清图片、Tab 处理、看板截图、坏文件预检；<b>阶段2</b> LibreOffice 把 docx 转成 HTML（图表/文本框在此栅格化成图片）；<b>阶段3</b> 清理 HTML → 按 h1 切章 → 注入本页配置的样式 → 组包（默认 EPUB2）。样式类改动重跑阶段3 即生效（有缓存秒级）；动手术类设置则全量重算。
       </div>
     </div>
   </div>
@@ -187,12 +166,37 @@ iframe{width:100%;height:720px;border:1px solid var(--bd);border-radius:8px;back
 <div class="page" id="p_read">
   <div class="card" style="margin-bottom:12px">
     <div class="row" style="margin:0">
-      <label style="width:auto">选书：</label>
-      <select id="readSel" style="flex:1" onchange="$('readFrame').src='/reader?book='+encodeURIComponent(this.value)"></select>
-      <button class="ghost" onclick="window.open('/reader?book='+encodeURIComponent($('readSel').value))">新窗口打开</button>
+      <label style="width:auto">EPUB 目录：</label>
+      <input id="readDir" type="text" placeholder="点右边按钮选文件夹，自动扫描其中的 EPUB" style="flex:1;font-family:Consolas,monospace"/>
+      <button class="ghost" onclick="pickReadDir()">📂 打开文件夹并扫描</button>
+      <button class="ghost" onclick="openWebPicker('read')">🌐 浏览器内选目录</button>
+      <span id="readInfo" class="small"></span>
     </div>
+    <div class="srcList" id="readList" style="margin-top:8px"><span class="small">选一个存 EPUB 的文件夹，点书名即在本页预览。</span></div>
   </div>
   <iframe id="readFrame" src="/reader"></iframe>
+</div>
+
+<!-- ============ 网页内目录选择器（无 tkinter / headless 兜底） ============ -->
+<div class="overlay" id="webPicker">
+  <div class="modal">
+    <header>
+      <b>🌐 浏览器内选择目录</b>
+      <input class="pickPath" id="webPathInput" placeholder="可直接输入或粘贴任意路径，如 D:/金融科技案例1207收" onkeydown="if(event.key==='Enter')webGo()"/>
+      <button class="ghost" onclick="webGo()">转到</button>
+    </header>
+    <div class="body">
+      <div class="toolbar">
+        <button class="ghost" onclick="webUp()">↑ 上级</button>
+        <span class="small" id="webCur"></span>
+      </div>
+      <div id="webDirs"></div>
+    </div>
+    <div class="foot">
+      <button class="ghost" onclick="webClose()">取消</button>
+      <button onclick="confirmWebPick()">✔ 选择此目录</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -204,7 +208,6 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
   document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); $('p_'+b.dataset.p).classList.add('on');
-  if(b.dataset.p==='dash') loadDash();
   if(b.dataset.p==='qc') loadScores();
 });
 
@@ -307,30 +310,8 @@ async function rollback(){
   else $('msg').textContent='回滚失败';
   setTimeout(()=>$('msg').textContent='',4000);
 }
-async function run(stage){
-  const book_id=$('sampleSel').value; if(!book_id) return;
-  $('lastRun').textContent='执行中…（'+book_id+' stage='+stage+'）';
-  const r=await j('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({book_id,stage})});
-  const g=r.gate_l1l2||{};
-  $('lastRun').innerHTML=`状态 <b class="st-${r.status}">${r.status}</b> · L1=${g.l1??'-'}% · L2=${g.l2??'-'} · 耗时 ${r.elapsed_s}s`;
-}
 
-/* ---------- 仪表盘 ---------- */
-async function loadDash(){
-  const s=await j('/api/stats');
-  const bs=s.by_status||{};
-  $('statCards').innerHTML=`
-    <div class="stat"><b>${s.total}</b><span>累计任务（去重）</span></div>
-    <div class="stat ok"><b>${bs.done||0}</b><span>done 通过</span></div>
-    <div class="stat bad"><b>${bs.failed||0}</b><span>failed 失败</span></div>
-    <div class="stat"><b>${s.avg_elapsed}s</b><span>平均耗时/本</span></div>`;
-  $('fmtBody').innerHTML=Object.entries(s.input_fmt||{}).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('');
-  $('failBody').innerHTML=(s.fails||[]).map(f=>`<tr><td>${f.book_id}</td><td class="st-failed">${f.err}</td></tr>`).join('')||'<tr><td colspan="2" class="small">无失败</td></tr>';
-  $('recentBody').innerHTML=(s.recent||[]).map(t=>{
-    const g=t.gate_l1l2||{};
-    return `<tr><td>${t.book_id}</td><td class="st-${t.status}">${t.status}</td><td>${g.l1??''}${g.l2?' / '+g.l2:''}</td><td>${t.elapsed_s??''}s</td><td>${t.ts||''}</td></tr>`;
-  }).join('');
-}
+/* ---------- 仪表盘（已移除） ---------- */
 
 /* ---------- 转换控制台 ---------- */
 let FILES=[];   // 统一清单：{src, book_id, display}
@@ -344,7 +325,57 @@ async function loadSrcs(){
   const ss=await j('/api/samples');
   FILES=ss.map(s=>({src:s.src, book_id:s.book_id, display:s.book_id}));
   renderList();
-  $('readSel').innerHTML='<option value="">— 选择 EPUB —</option>'+ss.map(s=>`<option>${s.book_id}</option>`).join('');
+}
+async function pickDir(){
+  const r=await j('/api/pick-dir');
+  return r.ok ? r.dir : '';
+}
+async function pickScanDir(){
+  const d=await pickDir();
+  if(!d) return;
+  $('scanDir').value=d;
+  scanDirFn();
+}
+/* ---------- 网页内目录选择器（无 tkinter / headless 兜底） ---------- */
+let webPickMode=null;
+function jsEscape(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+function pathParent(p){
+  p=(p||'').replace(/[\\/]+$/,'');
+  if(!p) return '';
+  if(/^[A-Za-z]:$/.test(p)) return '';                 // 盘符根，无法再上
+  const i=Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return i>0 ? p.slice(0,i) : '';
+}
+async function openWebPicker(mode){
+  webPickMode=mode;
+  const cur=(mode==='read'?$('readDir').value:$('scanDir').value)||'C:/';
+  $('webPathInput').value=cur;
+  await navTo(cur);
+  $('webPicker').classList.add('on');
+}
+async function navTo(p){
+  const r=await j('/api/list-dir?path='+encodeURIComponent(p||'C:/'));
+  if(!r.ok) return;
+  $('webCur').textContent='当前：'+r.path;
+  $('webPathInput').value=r.path;
+  let h='';
+  if(r.parent) h+=`<div class="dirRow" onclick="navTo('${jsEscape(r.parent)}')"><span class="ico">⬆</span> 上级目录 (${r.parent})</div>`;
+  if(!r.dirs.length && !r.files.length) h+='<div class="fileRow">（空目录或无访问权限）</div>';
+  for(const d of r.dirs){
+    const nm=d.replace(/[\\/]+$/,'').split(/[\\/]/).pop();
+    h+=`<div class="dirRow" onclick="navTo('${jsEscape(d)}')"><span class="ico">📁</span> ${nm}</div>`;
+  }
+  for(const f of r.files) h+=`<div class="fileRow">📄 ${f}</div>`;
+  $('webDirs').innerHTML=h;
+}
+function webUp(){ navTo(pathParent($('webPathInput').value)||'C:/'); }
+function webGo(){ const p=$('webPathInput').value.trim(); if(p) navTo(p); }
+function webClose(){ $('webPicker').classList.remove('on'); }
+async function confirmWebPick(){
+  const p=$('webPathInput').value.trim(); if(!p) return;
+  $('webPicker').classList.remove('on');
+  if(webPickMode==='scan'){ $('scanDir').value=p; scanDirFn(); }
+  else { $('readDir').value=p; readDirScan(p); }
 }
 async function scanDirFn(){
   const d=$('scanDir').value.trim(); if(!d) return;
@@ -411,15 +442,38 @@ async function loadScores(){
     <td>${r.l1??'—'}</td><td>${r.l2??'—'}</td><td>${r.sections??'—'}</td><td>${r.imgs??'—'}</td>
     <td>${r.elapsed??'—'}s</td><td>${r.epub?'有':'无'}</td>
     <td class="small ${r.status==='failed'?'st-failed':''}">${r.err||''}</td>
-    <td>${r.epub?`<button class="ghost" onclick="openReader('${r.book_id}')">试读</button>`:''}</td></tr>`).join('')
+    <td>${r.epub?`<button class="ghost" onclick="openReader('${encodeURIComponent(r.epub_path||'')}')">试读</button>`:''}</td></tr>`).join('')
     ||'<tr><td colspan="10" class="small">无记录</td></tr>';
 }
-function openReader(bid){
+function openReader(epEnc){
+  const ep=decodeURIComponent(epEnc); if(!ep) return;
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.p==='read'));
   document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));
   $('p_read').classList.add('on');
-  $('readSel').value=bid;
-  $('readFrame').src='/reader?book='+encodeURIComponent(bid);
+  $('readFrame').src='/reader?book='+encodeURIComponent(ep);
+}
+
+/* ---------- 试读：文件夹扫描选书 ---------- */
+let EPUBS=[];
+async function pickReadDir(){
+  const d=await pickDir();
+  if(!d) return;
+  $('readDir').value=d;
+  readDirScan(d);
+}
+async function readDirScan(d){
+  $('readInfo').textContent='扫描中…';
+  const r=await j('/api/epub-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dir:d})});
+  if(!r.ok){$('readInfo').textContent=r.err;return}
+  EPUBS=r.items;
+  $('readInfo').textContent=`共 ${r.total} 本 EPUB`;
+  $('readList').innerHTML=EPUBS.map((b,i)=>`
+    <label><input type="radio" name="readPick" onchange="readThis(${i})"/> ${b.name}${b.size_kb>=0?` <span class="small">（${b.size_kb}KB）</span>`:''}</label>`).join('')
+    ||'<span class="small">该目录（含子目录）下没有 EPUB 文件</span>';
+}
+function readThis(i){
+  const b=EPUBS[i]; if(!b) return;
+  $('readFrame').src='/reader?book='+encodeURIComponent(b.path);
 }
 
 /* ---------- 初始化 ---------- */
@@ -430,7 +484,6 @@ function openReader(bid){
   ROOT_INFO=await j('/api/root');
   outDirSync();
   await loadSrcs();
-  await loadDash();
 })();
 </script>
 </body>

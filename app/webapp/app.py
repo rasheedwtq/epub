@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """docx2epub Web 控制台后端（FastAPI）
-模块3 配置中心 + 模块1 仪表盘 + 模块2 转换控制台（后台 worker）+ 模块4 质检面板 + 模块6 试读
+模块3 配置中心 + 模块2 转换控制台（后台 worker）+ 模块4 质检面板 + 模块6 试读
 原则（设计文档铁律）：UI 只发参数；转换绝不跑在 web 请求线程里（独立 worker 子进程）。
 
-启动: python webapp/app.py  →  http://127.0.0.1:8300
+启动: python app/webapp/app.py  →  http://127.0.0.1:8300
 """
 import os, sys, json, shutil, subprocess, time, threading
 from pathlib import Path
@@ -44,21 +44,9 @@ def index():
 def reader():
     return FileResponse(APP / "webapp" / "static" / "reader.html")
 
-@app.get("/api/epubs")
-def epubs():
-    """列出所有可试读的 EPUB（manifest 驱动：支持任意输出目录，平铺/旧版目录布局均兼容）"""
-    from urllib.parse import quote
-    out = []
-    for bid, r in manifest_latest().items():
-        ep = r.get("epub")
-        if r.get("status") == "done" and ep and os.path.exists(ep):
-            out.append(dict(book_id=bid, url=f"/api/epub-file?path={quote(ep)}", path=ep))
-    out.sort(key=lambda x: x["book_id"])
-    return out
-
 @app.get("/api/epub-file")
 def epub_file(path: str):
-    """按绝对路径回源 EPUB（平铺输出目录不再固定，静态挂载覆盖不到）"""
+    """按绝对路径回源 EPUB（输出目录任意，静态挂载覆盖不到）"""
     p = os.path.abspath(path)
     if not p.lower().endswith(".epub") or not os.path.exists(p):
         return JSONResponse(dict(ok=False, err="EPUB 不存在"), status_code=404)
@@ -137,26 +125,92 @@ def tasks(limit: int = 30):
     lines = MANIFEST.read_text(encoding="utf-8").strip().splitlines()
     return [json.loads(l) for l in lines[-limit:]]
 
-@app.post("/api/run")
-def run(payload: dict = Body(...)):
-    book_id = payload["book_id"]
-    src = payload.get("src")
-    stage = payload.get("stage", "3")
-    out_dir = (payload.get("out_dir") or "").strip() or str(OUT)
-    if not src:
-        hits = [s for s in samples() if s["book_id"] == book_id]
-        if not hits: return JSONResponse(dict(ok=False, err="样本不存在"), status_code=404)
-        src = hits[0]["src"]
-    r = subprocess.run([PY, str(APP / "tools" / "pipeline.py"), "convert", src,
-                        "-c", str(CFG), "-o", out_dir, "--book-id", book_id, "--stage", stage],
-                       cwd=str(ROOT), capture_output=True, timeout=600)
-    try:
-        rec = json.loads(r.stdout.strip().splitlines()[-1])
-    except Exception:
-        rec = dict(ok=False, err=(r.stderr or b"").decode("utf-8", "ignore")[-500:])
-    return rec
+# ---------------------------------------------------------------- 原生文件夹选择器 + EPUB 扫描（试读用）
 
-# ---------------------------------------------------------------- 模块1 仪表盘 + 模块4 质检：manifest / 评分卡数据
+_PICK_LOCK = threading.Lock()
+
+@app.get("/api/pick-dir")
+def pick_dir():
+    """弹文件夹选择框（本机部署，服务端 tkinter 与浏览器同机）。
+    兜底链：优先 tkinter；若服务器 python 无 tkinter（或不可用）自动回退 PowerShell 原生对话框。"""
+    if not _PICK_LOCK.acquire(blocking=False):
+        return JSONResponse(dict(ok=False, err="已有一个选择框在等待确认"), status_code=409)
+    try:
+        d = _pick_tkinter()
+        if d is None:                      # tkinter 不可用 -> 回退 PowerShell
+            d = _pick_powershell()
+        return dict(ok=bool(d), dir=d or "")
+    except Exception as e:
+        return JSONResponse(dict(ok=False, err=f"文件夹选择失败: {e}"), status_code=500)
+    finally:
+        _PICK_LOCK.release()
+
+def _pick_tkinter():
+    """用服务器 python 弹 tkinter 选择框。返回 路径 / ''（取消） / None（不可用）。"""
+    # 关键：子进程强制 UTF-8 模式（PYTHONUTF8=1），否则中文 Windows 上 tkinter 返回的路径
+    # 会被按 ANSI/GBK 错误解码成乱码（如"金融"→"ڿƼ"）；并用 sys.stdout.buffer 显式写 UTF-8。
+    code = ("import sys, tkinter as tk\n"
+            "from tkinter import filedialog\n"
+            "r=tk.Tk();r.withdraw();r.attributes('-topmost',True);r.focus_force()\n"
+            "p=filedialog.askdirectory() or ''\n"
+            "sys.stdout.buffer.write(p.encode('utf-8'))\n")
+    env = dict(os.environ); env["PYTHONUTF8"] = "1"
+    try:
+        r = subprocess.run([PY, "-c", code], capture_output=True, timeout=300,
+                           cwd=str(ROOT), env=env)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None                       # 无 tkinter 等 -> 触发回退
+    return r.stdout.decode("utf-8", "ignore").strip().strip('"')
+
+def _pick_powershell():
+    """回退方案：PowerShell FolderBrowserDialog（Windows 原生，无需 tkinter）。"""
+    ps = ("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+          "Add-Type -AssemblyName System.Windows.Forms;"
+          "$f=New-Object System.Windows.Forms.FolderBrowserDialog;"
+          "$f.Description='选择文件夹（docx2epub）';"
+          "if($f.ShowDialog() -eq 'OK'){[Console]::Out.Write($f.SelectedPath)}")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, timeout=300, cwd=str(ROOT))
+    except Exception:
+        return ""
+    return r.stdout.decode("utf-8", "replace").strip().strip('"')
+
+@app.get("/api/list-dir")
+def list_dir(path: str = ""):
+    """网页内目录导航（headless / 无 GUI 时的终极兜底）：列出 path 的子目录与文件。"""
+    base = Path(path) if path else Path("C:/")
+    if not base.exists() or not base.is_dir():
+        base = Path("C:/")
+    try:
+        entries = sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except (PermissionError, OSError):
+        entries = []
+    dirs = [str(p) for p in entries if p.is_dir()]
+    files = [p.name for p in entries if p.is_file()]
+    parent = str(base.parent) if base.parent != base else ""
+    return dict(ok=True, path=str(base), parent=parent, dirs=dirs, files=files)
+
+@app.post("/api/epub-scan")
+def epub_scan(payload: dict = Body(...)):
+    """扫描目录（含子目录）下所有 EPUB，供试读页选书"""
+    from urllib.parse import quote
+    d = (payload.get("dir") or "").strip().strip('"')
+    if not d or not os.path.isdir(d):
+        return JSONResponse(dict(ok=False, err=f"目录不存在: {d}"), status_code=400)
+    items = []
+    for root, _ds, ns in os.walk(d):
+        for n in ns:
+            if n.lower().endswith(".epub"):
+                p = os.path.join(root, n)
+                try: size_kb = round(os.path.getsize(p) / 1024, 1)
+                except OSError: size_kb = -1
+                items.append(dict(name=n, path=p, size_kb=size_kb,
+                                  url=f"/api/epub-file?path={quote(p)}"))
+    items.sort(key=lambda x: x["name"])
+    return dict(ok=True, dir=d, total=len(items), items=items[:500])
 
 def manifest_latest() -> dict:
     """book_id -> manifest 最新一条记录"""
@@ -169,30 +223,6 @@ def manifest_latest() -> dict:
         except Exception:
             pass
     return out
-
-@app.get("/api/stats")
-def stats():
-    """模块1 仪表盘：manifest 全量聚合（book_id 去重取最新）"""
-    m = manifest_latest()
-    by_status, fmt, fails = {}, {}, []
-    total_t = 0.0; n_t = 0
-    for bid, r in m.items():
-        st = r.get("status", "?")
-        by_status[st] = by_status.get(st, 0) + 1
-        src = r.get("src", "")
-        if st == "failed":
-            kind = "坏文件/加密" if "_f0" in bid or "坏文件" in src else "闸门未过"
-        else:
-            kind = Path(src).suffix.lower().lstrip(".") or "未知"
-        fmt[kind] = fmt.get(kind, 0) + 1
-        if r.get("elapsed_s"):
-            total_t += r["elapsed_s"]; n_t += 1
-        if st == "failed":
-            fails.append(dict(book_id=bid, err=(r.get("err") or "")[:160]))
-    recent = sorted(m.values(), key=lambda r: r.get("ts", ""))[-12:][::-1]
-    return dict(total=len(m), by_status=by_status, input_fmt=fmt,
-                avg_elapsed=round(total_t / n_t, 1) if n_t else 0,
-                fails=fails, recent=recent)
 
 @app.get("/api/scores")
 def scores():
@@ -217,7 +247,8 @@ def scores():
                          elapsed=t.get("elapsed_s"),
                          out_dir=r.get("out_dir") or (str(Path(ep).parent) if ep else ""),
                          err=(r.get("err") or t.get("err") or "")[:160],
-                         epub=bool(ep and os.path.exists(ep))))
+                         epub=bool(ep and os.path.exists(ep)),
+                         epub_path=ep if ep and os.path.exists(ep) else ""))
     return rows
 
 # ---------------------------------------------------------------- 模块2 转换控制台：后台 worker（独立子进程，绝不占用 web 线程）
@@ -229,6 +260,18 @@ def _kill_tree(pid):
     """Windows 杀整棵进程树（python pipeline + 其拉起的 soffice）"""
     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
 
+def _up_to_date(rec: dict, src: str) -> bool:
+    """断点续跑跳过判定（2026-10-12 修"源文件改完重转还是旧货"）：
+    以前只看 manifest 状态 done 就跳过——源文件改完照样被跳。
+    现在加新鲜度：上次产物 EPUB 比源文件旧（留 2s 时间精度容忍）→ 不跳，必须重转。"""
+    ep = (rec or {}).get("epub") or ""
+    try:
+        if not (ep and os.path.exists(ep) and src and os.path.exists(src)):
+            return False
+        return os.path.getmtime(ep) >= os.path.getmtime(src) - 1
+    except OSError:
+        return False
+
 def _batch_worker(items: list, out_dir: str = ""):
     out_root = out_dir or str(OUT)
     skip_done = BATCH.get("skip_done", True)
@@ -238,8 +281,10 @@ def _batch_worker(items: list, out_dir: str = ""):
         if BATCH["cancel"]: break
         bid = item["book_id"]
         if skip_done and done_map.get(bid, {}).get("status") == "done":
-            item.update(status="skipped", summary="断点续跑：已完成，跳过")
-            continue
+            if _up_to_date(done_map.get(bid, {}), src):
+                item.update(status="skipped", summary="断点续跑：已完成，跳过")
+                continue
+            BATCH["logs"].append(f"[新] {bid} — 源文件比上次产物新（改过），重转")
         item.update(status="running")
         rec = {}
         for attempt in (1, 2):   # V-1 结论：失败自动重试 1 次（消化瞬时环境故障）

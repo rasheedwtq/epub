@@ -193,10 +193,12 @@ def snap_floating(src, out_docx, img_dir, log=None):
         for s in cands:
             clusters.setdefault(find(s.ID), []).append(s)
         for grp in clusters.values():
-            if not any(met[s.ID][2] for s in grp):   # 纯图片簇不动（是正常内容图）
-                continue
+            # 大叔拍板 2026-10-10：浮动图片簇也一律截图转内嵌——实证（安心养老图三）：
+            # LO 把"锚段下方"的浮动图输出到锚段前面，位置漂移；内嵌图 LO 处理无问题。
+            # 原规则"纯图片簇不动"只对内嵌图成立（内嵌图不在 Shapes 集合，不会到这里）。
             top = min((lambda t: t if t is not None and t > -900000 else 0.0)(s.Top) for s in grp)
-            targets.append((grp, "textbox", met[grp[0].ID][1], top))
+            why = "textbox" if any(met[s.ID][2] for s in grp) else "picture"
+            targets.append((grp, why, met[grp[0].ID][1], top))
 
         def _cur_idx():
             """现场索引表（Shape.ID → 当前序号）：Shapes 在 Delete 后会重排"""
@@ -232,6 +234,10 @@ def snap_floating(src, out_docx, img_dir, log=None):
                     shp = refs[0]
                     shp.Select()
                     emf = word.Selection.Range.EnhMetaFileBits
+                    # 【2026-10-10c 撤销视觉页搬迁】微服务实证：ScrollIntoView+RangeFromPoint 探针
+                    # 会被未完成的重新分页骗到（锚 p11 报"视觉页1"→ 看板被搬去第 1 页开头），
+                    # 且智慧政法 XML 级对照已证明 accept 后锚点页==视觉页、按锚段插入即正确。
+                    # → 一律按锚段插入，不再做任何跨页搬迁。
                     rng = _insert_rng(shp.Top, shp.Anchor)
                     shp.Delete()
                 else:

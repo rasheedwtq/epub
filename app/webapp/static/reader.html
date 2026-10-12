@@ -21,13 +21,11 @@ main{padding:12px 24px;max-width:1100px;margin:0 auto}
 </head>
 <body>
 <header>
-  <h1>epub.js 实测阅读器</h1>
-  <select id="bookSel" style="flex:1"><option value="">加载中…</option></select>
-  <button onclick="openBook()">打开</button>
+  <h1>epub.js 阅读器</h1>
   <button onclick="prev()">‹ 上一页</button>
   <button onclick="next()">下一页 ›</button>
   <span id="info" class="small"></span>
-  <a href="/" class="small">← 返回配置中心</a>
+  <a href="/" class="small">← 返回控制台</a>
 </header>
 <main>
   <div id="viewer"></div>
@@ -37,16 +35,15 @@ main{padding:12px 24px;max-width:1100px;margin:0 auto}
 const $=id=>document.getElementById(id);
 let book=null, rendition=null;
 async function init(){
-  const list=await (await fetch('/api/epubs')).json();
-  $('bookSel').innerHTML='<option value="">— 选择 EPUB —</option>'+
-    list.map(b=>`<option value="${b.url}">${b.book_id}</option>`).join('');
   const want=new URLSearchParams(location.search).get('book');
-  const hit=want?list.find(b=>b.book_id===want):null;
-  if(hit){ $('bookSel').value=hit.url; openBook(hit.url); }
-  else if(list.length) openBook(list[0].url);
+  if(want){
+    openBook('/api/epub-file?path='+encodeURIComponent(want));
+  }else{
+    $('info').textContent='未指定书籍——从控制台「试读」页选书打开。';
+  }
 }
 async function openBook(url){
-  url=url||$('bookSel').value; if(!url) return;
+  if(!url) return;
   if(rendition){rendition.destroy(); rendition=null;}
   $('info').textContent='解析中…';
   try{

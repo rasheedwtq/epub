@@ -73,10 +73,12 @@ def lo_convert(src, outdir, profile, fmt="html"):
         raise RuntimeError(f"LO 转换未产出 {'HTML' if fmt=='html' else 'DOCX'}（rc={r.returncode}）{tail}")
     return os.path.join(outdir, h[0])
 
-def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
+def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, styles_cfg=None):
     """解析 LO HTML → 清理 → 按 h1 切章。返回 (sections:[(title, xhtml_str)], images:[src_file])
     img_max：图片内联锁定宽度的上限(px)，声明/实际宽超过它的图转纯流式 max-width:100%
-    numbering_map：{规范化段文本: [Word 权威编号,...]}，用于 ol/li 拍平的字面编号（见 pipeline.build/extract）"""
+    numbering_map：{规范化段文本: [Word 权威编号,...]}，用于 ol/li 拍平的字面编号（见 pipeline.build/extract）
+    styles_cfg：config styles 块——h1/h2/h3 字号/加粗按配置内联固化（平台可能不加载 styles.css，
+    固定样式=硬要求，2026-10-12 大叔拍板：目标不是还原而是按配置统一格式）"""
     raw = open(html_path, "rb").read()
     doc = LH.document_fromstring(raw.decode("utf-8", "replace"))
     body = doc.body
@@ -125,6 +127,21 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
     #   渲染成 1.6em 全大字，还污染 <title> 和目录）→ 降级为普通段落，保留段内原有加粗/字号标记
     for h in body.xpath("//h1|//h2|//h3|//h4|//h5|//h6"):
         if len(h.text_content().strip()) > 60:
+            h.tag = "p"
+    # 1.85) 标题识别修正（2026-10-12 问题清单 #1/#2 实证）：
+    #   a) 空 h1 删除：Word 里误挂"标题1"样式的空段（内容只有 <br/>），LO 忠实导出成空 h1，
+    #      切章时产出"未命名"垃圾章节（转换1/转换2 目录各多出 1-2 个"未命名"）；
+    #      含图/表的"空标题"降级为 p 保留内容。
+    #   b) "关键词：…"行降级为普通段落：作者常把关键词行误挂标题样式（转换1 实证与主标题同款
+    #      style=2），渲染成大字居中还独占一章；转换2 里同位置的关键词行就是普通段落——统一按段落。
+    for h in body.xpath("//h1|//h2|//h3|//h4|//h5|//h6"):
+        txt = h.text_content().strip()
+        if not txt:
+            if h.xpath(".//img|.//table"):
+                h.tag = "p"
+            else:
+                h.getparent().remove(h)
+        elif re.match(r"^关键词[:：]", txt):
             h.tag = "p"
     # 1.8b) 列表拍平（2026-10-09 拍板）：LO 导出的自动编号是"一段一 ol"，start 续号错位
     #   （渲染成 1、1、2…），序号后还带 Word tab 的大空隙 → 按基线 docx 的 Word 权威编号
@@ -202,7 +219,9 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
         if tbl.xpath(".//table"):
             continue
         if tbl.text_content().strip(_INVIS) == "" and tbl.xpath(".//img"):
-            wrap = etree.Element("p")
+            # makeelement：etree.Element 造出的 _Element 无 text_content，进 body 后
+            # 后续环节（4.7 缩进等）调用会崩（2026-10-12 实证）
+            wrap = body.makeelement("p", {})
             wrap.set("style", "text-align:center")
             for img in tbl.xpath(".//img"):
                 wrap.append(img)   # lxml 自动从原父节点摘下
@@ -242,8 +261,11 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
         #   且 margin:auto 居中也无效；改为行内 img 后 width/max-width/段落 text-align:center 全部生效。
         #   → 统一走行内图，独占段落的图改用宿主段落 text-align:center 居中（浏览器视觉不变）。
         inline = "max-width:100%;height:auto"
-        if px is not None and px >= 20:
-            inline = f"width:{int(min(px, img_max))}px;" + inline
+        # 大叔 2026-10-10d 拍板：自然宽超过版心上限的图（snap 看板 1000-1200px、LO 内容图 1000px）
+        # 转纯流式 max-width:100% 跟阅读窗走（智慧政法"图还是小"实证：锁 554px 在宽窗里不跟手）；
+        # 自然宽在版心内的小图才锁死像素（防放大糊掉）。
+        if px is not None and px >= 20 and nat is not None and nat <= img_max:
+            inline = f"width:{int(px)}px;" + inline
         # 独占段落的图居中（行内小图不动，免破坏文字流）
         cont = img.getparent()
         for _ in range(3):
@@ -266,6 +288,7 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
             else:
                 st = (st + ";" if st else "") + "text-align:center"
             cont.set("style", st)
+        # 图+图题/图文混排的拆段统一由 4.65 处理（此处的旧 br 方案已废弃，避免残留多余 <br/>）
         if src:
             images.append(src)
     # 3) 表格：去 width 属性，CSS 统一管
@@ -295,6 +318,23 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
     for a_el in body.xpath("//a[@name][not(@id)]"):
         a_el.set("id", a_el.get("name"))
         del a_el.attrib["name"]
+    # c2) Word 书签空锚点清除（大叔 2026-10-10：读者端把 _Toc 目录书签/_GoBack 光标位/
+    #     OLE_LINK 复制残留全列成"书签"）。仅清"无 href 且无可见内容"的空锚点，
+    #     带内容/带 href 的（脚注双向锚）保留；tail 并回前兄弟或父 text（remove 会丢 tail）。
+    for a_el in body.xpath("//a[not(@href)]"):
+        if "".join(a_el.itertext()).strip() or a_el.find(".//img") is not None:
+            continue
+        tail = a_el.tail
+        prev = a_el.getprevious()
+        par = a_el.getparent()
+        if par is None:
+            continue
+        if tail:
+            if prev is not None:
+                prev.tail = (prev.tail or "") + tail
+            else:
+                par.text = (par.text or "") + tail
+        par.remove(a_el)
     # d) 文本框绝对定位 span 解包（其内部含块级元素，导致 p 嵌套 p）
     for sp in body.xpath("//span[contains(@style,'position: absolute')]"):
         sp.drop_tag()
@@ -322,9 +362,89 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
                 changed = True
         if not changed:
             break
+    # 4.65) 图文拆段（2026-10-10 六书实证）：图夹在文字中间（浮动环绕残留，如"建|图|融智医"）、
+    #   段首内联（绝对定位图解包后）、段尾内联（snap 看板插在锚段末）都会"位置错乱"。
+    #   统一拆出：img 独立成段 text-align:center；前后文本保持原序。"图+短题注(≤40字)"同段
+    #   也统一拆段（题注独立居中行，复刻 Word 视觉）；LO 环绕残留 br[clear] 一并删除。
+    for br_c in body.xpath("//br[@clear]"):
+        t = br_c.tail
+        if t:                              # tail 安全并入（直接 remove 会丢 br 后正文——lxml 教训）
+            prev = br_c.getprevious()
+            if prev is not None:
+                prev.tail = (prev.tail or "") + t
+            else:
+                par = br_c.getparent()
+                par.text = (par.text or "") + t
+        br_c.getparent().remove(br_c)
+    def _img_frags(p_el):
+        """段落内按 img 切分的文本片段（文档序；img 前/间/后的纯文本，去空白）"""
+        frags = [""]
+        def _walk(e):
+            if e.tag == "img":
+                frags.append("")
+                return
+            if e.text:
+                frags[-1] += e.text
+            for ch in e:
+                _walk(ch)
+                if ch.tail:
+                    frags[-1] += ch.tail
+        _walk(p_el)
+        return [re.sub(r"\s+", "", f) for f in frags]
+    for p_el in list(body.iter("p")):
+        if p_el.xpath("ancestor::td|ancestor::th|ancestor::p"):
+            continue
+        while True:
+            imgs = p_el.xpath(".//img")
+            if not imgs:
+                break                  # 纯文字段/已拆完
+            if len(imgs) > 1:
+                # 多图段（2026-10-12 问题#5 实证：img1+图1题+img2 挤一段，图1题混在图中间）：
+                # 仅当所有文字片段都是短题注（≤40字）时逐图拆段；长文图文混排不动
+                if not all(len(f) <= 40 for f in _img_frags(p_el)):
+                    break
+            img = imgs[0]
+            # 注意：兄弟元素的 tail 也是正文（如 <a _GoBack>长文tail</a><img/>——去 font 后长文全在
+            # a.tail 里），itertext() 不含自身 tail，漏算会把"图文混排段"误判成"纯图段"跳过
+            def _stx(s):
+                return "".join(s.itertext()) + (s.tail or "")
+            a_txt = (img.tail or "") + "".join(_stx(s) for s in img.itersiblings())
+            b_txt = (p_el.text or "") + "".join(_stx(s) for s in img.itersiblings(preceding=True))
+            b_txt, a_txt = re.sub(r"\s+", "", b_txt), re.sub(r"\s+", "", a_txt)
+            if not b_txt and not a_txt:
+                break                  # 纯图段（standalone 已居中，不动；break 防死循环）
+            # 关键：img 的 tail 常是正文纯文本（如"建<img/>融智医综合服务平台……"的"融智医…"117 字），
+            # 摘 img 前必须先用 span 把 tail 留在原位，否则正文整段丢失（L1 96.92% 事故，2026-10-10）
+            t = img.tail
+            if t and t.strip():
+                # 用 makeelement 而非 etree.Element：后者造出 _Element（无 text_content），
+                # 后续环节对 body 内所有元素调 text_content() 会 AttributeError（2026-10-12 实证）
+                sp = p_el.makeelement("span", {})
+                sp.text = t
+                img.addnext(sp)
+            img.tail = None
+            fig = p_el.makeelement("p", {})
+            fig.set("style", "text-align:center")
+            fig.append(img)
+            parent = p_el.getparent()
+            if not b_txt:                 # 段首图：图段放文字段之前（保持"图在前"视觉序）
+                parent.insert(parent.index(p_el), fig)
+                if 0 < len(a_txt) <= 40:  # 图+短题注：题注行也居中（4.7 缩进例外靠 center 判定）
+                    st = (p_el.get("style") or "").strip().rstrip(";")
+                    if not re.search(r"text-align\s*:", st, re.I):
+                        p_el.set("style", (st + ";" if st else "") + "text-align:center")
+            else:                         # 段尾图/夹中间：图段放文字段之后（夹中间时前后文本自然合并回一段）
+                parent.insert(parent.index(p_el) + 1, fig)
+                if not a_txt and 0 < len(b_txt) <= 40:
+                    st = (p_el.get("style") or "").strip().rstrip(";")
+                    if not re.search(r"text-align\s*:", st, re.I):
+                        p_el.set("style", (st + ";" if st else "") + "text-align:center")
+            # 拆出一图后 p_el 里可能还有图（多图题注段），循环继续拆下一张
+
     # 4.7) 首行缩进定版（2026-10-09 16:30 拍板；16:40 扩大到各级标题）：
     #  a) 剥段首假缩进：原文用全角空格/半角空格/Tab 手敲的缩进全部清除（跨 span 递归剥到首个可见字符）
-    #  b) 正文段 + 正文各级标题一律强制首行缩进 2 字符（text-indent:2em）：
+    #  b) 正文段 + 正文各级标题一律强制首行缩进 2 字符；含 <br> 的多行段改用
+    #     padding-left:2em 整段块缩进（text-indent 只缩首行，详见下方 4.7 主循环注释）：
     #     标题含整段加粗的伪标题（引言/学习目标/一、二、…，本书库标题均为加粗段而非 h 标签）
     #     例外：居中段（大标题题行/图/图注，"开头大标题"全是居中题行）、表格内段、空段；
     #     h1 按样式表本就居中（文档主标题）不缩进，h2~h6 左对齐标题照常缩进
@@ -355,16 +475,141 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
     for p_el in ps:
         _strip_leading_ws(p_el)
     center_re = re.compile(r"text-align\s*:\s*center", re.I)
+    # 图/表题注行（2026-10-12 问题#5 实证：转换2 "图2 乌兹光伏项目监控室内尽调"独立成段，
+    # text-align:left + 缩进 11 字符 → 渲染成"缩进 2 字符"不居中）：
+    # 短段（≤40字）且以 "图N/表N"+分隔符 开头 → 一律居中，不吃正文 2em 缩进
+    CAPTION_RE = re.compile(r"^[图表]\s*\d+(?:[\s．.、：:]|$)")
     for p_el in ps:
+        st0 = p_el.get("style") or ""
+        # LO 悬挂/左缩进残留（如"（一）中欧班列背景"正文段 margin-left:2.91cm）。
+        # 大叔拍板 2026-10-10：段落统一格式，不要还原原稿的怪缩进——margin-left
+        # 一律清零，首行统一 2em。此前只清 hang 命中的段，导致正文段
+        # margin-left:2.91cm 残留 + 首行 2em 双重缩进（区块链中欧班列段实证）。
+        _strip_leading_ws(p_el)
         st = (p_el.get("style") or "").strip().rstrip(";")
         st = re.sub(r"(?:^|;)\s*text-indent\s*:[^;\"]*",
                     lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I).strip("; ")
-        if (not center_re.search(st)
-                and not p_el.xpath(".//table|ancestor::td|ancestor::th")
-                and p_el.text_content().strip()):
-            st = (st + ";" if st else "") + "text-indent:2em"
+        st = re.sub(r"(?:^|;)\s*margin-left\s*:[^;\"]*",
+                    lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I).strip("; ")
+        st = re.sub(r"(?:^|;)\s*padding-left\s*:[^;\"]*",
+                    lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I).strip("; ")
+        st = re.sub(r";{2,}", ";", st).strip("; ")
+        txt = re.sub(r"\s+", "", p_el.text_content())
+        in_table = bool(p_el.xpath(".//table|ancestor::td|ancestor::th"))
+        if (p_el.tag == "p" and not in_table and txt and len(txt) <= 40
+                and CAPTION_RE.match(p_el.text_content().strip())):
+            # 图/表题注行：强制居中（text-align:left 残留一并替换），不加缩进
+            ta_re = re.compile(r"text-align\s*:\s*\w+", re.I)
+            if ta_re.search(st):
+                st = ta_re.sub("text-align:center", st)
+            else:
+                st = (st + ";" if st else "") + "text-align:center"
+        elif (not center_re.search(st) and not in_table and txt):
+            # 缩进统一规则（2026-10-12 大叔拍板"举一反三"，原理层而非特例）：
+            # 除大标题/居中段/表格内段外一律缩进 2 字符；text-indent 只缩首行，
+            # 段内凡有 <br> 分行（思考题 ABCD/诗行/地址分行等）后续行必顶格——
+            # 多行段一律改用 padding-left:2em 整段块缩进（每行齐进齐退），禁用 text-indent。
+            if p_el.xpath(".//br"):
+                st = (st + ";" if st else "") + "padding-left:2em"
+            else:
+                st = (st + ";" if st else "") + "text-indent:2em"
         p_el.set("style", st)
-    # 5) 按 h1 切章；第一个 h1 之前的内容（文档主标题块/前言）并入第一章，不单独成章
+    # 4.8) 一级标题提升（2026-10-12 问题清单 #2 实证）："一、二、三…"短段是案例文档的
+    #   一级标题（源文件里是普通段落/自定义样式，不挂 Word Heading，LO 导出仍是 p）→
+    #   全书一级标题格式不统一、目录缺失。统一提升为 h2（class 加 sec1），剥掉段内
+    #   font-weight:normal 残留（否则压掉标题加粗）并参与 5) 切章。居中段/含图表段不动。
+    _SEC1_RE = re.compile(r"^[一二三四五六七八九十]{1,3}、")
+    for p_el in body.xpath("//p"):
+        if p_el.xpath("ancestor::td|ancestor::th|.//img|.//table"):
+            continue
+        t = re.sub(r"\s+", "", p_el.text_content())
+        if not t or len(t) > 50 or not _SEC1_RE.match(t):
+            continue
+        if center_re.search(p_el.get("style") or ""):
+            continue
+        p_el.tag = "h2"
+        p_el.set("class", ((p_el.get("class") or "") + " sec1").strip())
+        st = (p_el.get("style") or "").strip().rstrip(";")
+        st = re.sub(r"(?:^|;)\s*text-indent\s*:[^;\"]*",
+                    lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I)
+        st = re.sub(r"(?:^|;)\s*text-align\s*:[^;\"]*",
+                    lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I)
+        p_el.set("style", re.sub(r";{2,}", ";", st).strip("; "))
+        for sp in p_el.iter("span"):
+            spst = sp.get("style") or ""
+            if not spst:
+                continue
+            spst = re.sub(r"(?:^|;)\s*font-weight\s*:[^;\"]*",
+                          lambda m: ";" if m.group(0).startswith(";") else "", spst,
+                          flags=re.I).strip("; ")
+            if spst:
+                sp.set("style", spst)
+            else:
+                del sp.attrib["style"]
+    # 4.85) 全文大标题补挂（2026-10-12 大叔：8/23 大标题没按格式——源文件大标题是
+    #   普通居中段，没挂 Word Heading，LO 导出成 p，全文无 h1，配置的 1.6em 主标题
+    #   样式落空，大标题塌成正文）。规则：全文无 h1 时，取第一个非空居中短段
+    #   （≤50字、无图/表/br）提升为 h1；已有 h1 的文档不动（1/2 源挂了 Heading），
+    #   作者行等后续居中段不升级。必须先于 4.9 执行，提升的 h1 才吃得到配置样式。
+    if not body.xpath("//h1"):
+        for el in body.xpath("//p"):
+            if el.xpath("ancestor::td|ancestor::th|.//img|.//table|.//br"):
+                continue
+            t = re.sub(r"\s+", "", el.text_content())
+            if not t or len(t) > 50:
+                continue
+            if not center_re.search(el.get("style") or ""):
+                continue
+            el.tag = "h1"
+            st = (el.get("style") or "").strip().rstrip(";")
+            st = re.sub(r"(?:^|;)\s*text-indent\s*:[^;\"]*",
+                        lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I)
+            el.set("style", re.sub(r";{2,}", ";", st).strip("; "))
+            break
+    # 4.9) 标题固定样式内联（2026-10-12 大叔复核拍板：结构对了还不够，格式必须按配置统一）：
+    #   a) 字号/加粗内联固化——h1/h2/h3 此前全靠 styles.css，平台侧不加载样式表时
+    #      标题塌成正文大小（图片内联锁宽同理，固定样式=硬要求）
+    #   b) 除大标题（h1，居中）外一律首行缩进 2 字符——4.8 提升的 h2 晚于 4.7 缩进环节
+    #      且被剥过 text-indent，这里统一补齐（"一、二"标题缩进原则）
+    #   c) 标题内 span 的 font-size/weight/family 内联残留一并剥掉（内联会压掉配置值）
+    _HL = {"h1": ("h1_size", "h1_bold"), "h2": ("h2_size", "h2_bold"), "h3": ("h3_size", "h3_bold")}
+    _sc = styles_cfg or {}
+    for h in body.xpath("//h1|//h2|//h3"):
+        size_key, bold_key = _HL[h.tag]
+        size = _sc.get(size_key)
+        bold = _sc.get(bold_key)
+        st = (h.get("style") or "").strip().rstrip(";")
+        st = re.sub(r"(?:^|;)\s*font-size\s*:[^;\"]*",
+                    lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I).strip("; ")
+        if size:
+            st = (st + ";" if st else "") + f"font-size:{size}"
+        if bold is not None:
+            st = re.sub(r"(?:^|;)\s*font-weight\s*:[^;\"]*",
+                        lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I).strip("; ")
+            st = (st + ";" if st else "") + ("font-weight:bold" if bold else "font-weight:normal")
+        if h.tag != "h1" and not center_re.search(st):
+            # 与 4.7 同一原理（2026-10-12"举一反三"）：多行段（含 <br>）禁用
+            # text-indent（只缩首行），改 padding-left:2em 整段块缩进
+            if h.xpath(".//br"):
+                if not re.search(r"padding-left\s*:", st, re.I):
+                    st = (st + ";" if st else "") + "padding-left:2em"
+            elif not re.search(r"text-indent\s*:", st, re.I) \
+                    and not re.search(r"padding-left\s*:", st, re.I):
+                st = (st + ";" if st else "") + "text-indent:2em"
+        h.set("style", re.sub(r";{2,}", ";", st).strip("; "))
+        for sp in h.iter("span"):
+            spst = sp.get("style") or ""
+            if re.search(r"font-(?:size|weight|family)", spst, re.I):
+                spst = re.sub(r"(?:^|;)\s*font-(?:size|weight|family)\s*:[^;\"]*",
+                              lambda m: ";" if m.group(0).startswith(";") else "", spst,
+                              flags=re.I).strip("; ")
+                if spst:
+                    sp.set("style", spst)
+                else:
+                    del sp.attrib["style"]
+    # 5) 按 h1 切章——只认 h1（大标题）；一、二、三 提升的 h2 只做样式/层级，
+    #    不切章（2026-10-12 大叔：不要对一、二、三强行分页，全文连续输出）。
+    #    第一个切点之前的内容（申报类别/空行等前言）并入第一章，不单独成章
     children = list(body)
     sections, preamble = [], []
     cur_title, cur_nodes = None, None
@@ -372,7 +617,7 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
         if el.tag == "h1":
             if cur_nodes:
                 sections.append((cur_title, cur_nodes))
-            cur_title = el.text_content().strip() or "未命名"
+            cur_title = re.sub(r"\s+", " ", el.text_content()).strip() or "未命名"
             cur_nodes = [el]
         elif cur_nodes is None:
             preamble.append(el)
@@ -389,6 +634,24 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None):
         first_h1 = body.xpath("//h1[1]")
         title = first_h1[0].text_content().strip() if first_h1 else None
         sections = [(title, list(body))]
+    # 5.2) 无 h1 文档的标题推导（大叔 2026-10-10：阅读器书签栏全是兜底"文档"，实证 23 本通病）：
+    #   取正文前两个非空段拼合（主标题 + "——副标题"，如"探索架构转型实现安全可控——分布式微服务平台案例"）
+    def _derive_title(nodes):
+        got = []
+        for n in nodes:
+            if n.tag in ("p", "h1", "h2", "h3", "h4"):
+                t = re.sub(r"\s+", "", n.text_content())
+                if t:
+                    got.append(t)
+                    if len(got) >= 2:
+                        break
+        if not got:
+            return None
+        t = got[0]
+        if len(got) > 1 and got[1].startswith(("—", "――", "–")):
+            t += got[1]
+        return t[:60] or None
+    sections = [((t if t else _derive_title(nodes)), nodes) for t, nodes in sections]
     # 5.5) 跨章锚点改写：#frag → 所在 section 文件；找不到目标则降级为纯文字（防 RSC-012）
     id_map = {}
     for si, (t, nodes) in enumerate(sections):

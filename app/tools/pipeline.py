@@ -215,6 +215,147 @@ def _loprof(wd):
     os.makedirs(prof_dir, exist_ok=True)
     return "file:///" + prof_dir.replace("\\", "/")
 
+def _docx_has_revisions(src):
+    """快检 docx 是否含修订标记（插入/删除/格式变更）；.doc/.rtf 无法快检 → 视为可能有"""
+    if not src.lower().endswith((".docx", ".docm")):
+        return True
+    try:
+        with zipfile.ZipFile(src) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "ignore")
+    except Exception:
+        return True
+    return "<w:ins " in xml or "<w:del " in xml or "PrChange" in xml
+
+
+def _norm_txt(s):
+    return "".join((s or "").split())
+
+
+def _shape_anchor_text(shp):
+    """Shape 锚段文本（去空白），accept 后用它找回位置"""
+    try:
+        return _norm_txt(shp.Anchor.Paragraphs(1).Range.Text)[:80]
+    except Exception:
+        return ""
+
+
+def _shape_emf(word, shp):
+    try:
+        shp.Select()
+        return word.Selection.Range.EnhMetaFileBits
+    except Exception:
+        return None
+
+
+def _reinsert_lost_shape(doc, shot, s1):
+    """把 accept 连带删除的浮动图回插为内嵌图：EMF→PNG→插锚段等价段末尾"""
+    from shapesnap import _emf_to_png     # 延迟 import（stage1 已注入 sys.path）
+    emf = shot.get("emf")
+    if not emf:
+        return 0
+    png = os.path.join(s1, "rescued_%s_%d.png" % (re.sub(r"\W+", "_", shot["name"])[:20],
+                                                  abs(hash(shot["ctx"])) % 100000))
+    _emf_to_png(emf, png)
+    rng = None
+    ctx = shot.get("ctx") or ""
+    if ctx:
+        paras = list(doc.Paragraphs)
+        texts = [_norm_txt(p.Range.Text) for p in paras]
+        for n in (60, 40, 25, 15, 10):      # 锚段可能含被删文字，accept 后变短 → 渐短前缀
+            key = ctx[:n]
+            if len(key) < 6:
+                break
+            for p, t in zip(paras, texts):
+                if key in t:
+                    pos = p.Range.End - 1
+                    rng = doc.Range(pos, pos)
+                    break
+            if rng is not None:
+                break
+    if rng is None:
+        pos = doc.Content.End - 1           # 兜底：文末
+        rng = doc.Range(pos, pos)
+    rng.InlineShapes.AddPicture(FileName=os.path.abspath(png), LinkToFile=False,
+                                SaveWithDocument=True, Range=rng)
+    return 1
+
+
+def accept_revisions(src, s1):
+    """P0 修订终稿化（2026-10-10，大叔拍板）：转换第一步统一接受所有修订，产出终稿 docx。
+
+    后续所有阶段（shape截图/tab手术/flatten/math/LO渲染/编号提取/L1基线）统一消费终稿，
+    杜绝"部分阶段见修订版、部分阶段见终稿"的图题错乱/删除字符泄漏（三方不同源事故）。
+    .doc/.rtf 顺带用 Word 转存 docx（比 LO 预转保真，且让它们进入 .docx 主路径）。
+    缓存 acc_<stem>.docx，源文件 mtime 变化自动重做；Word 不可用/打开失败原样回落（老路径照走）。
+    返回 (终稿src, info)；info["accept"] ∈ cache/none/accepted(N处)/fail(...)。
+    """
+    stem = os.path.splitext(os.path.basename(src))[0]
+    ext = src.lower().rsplit(".", 1)[-1]
+    acc = os.path.join(s1, "acc_" + stem + ".docx")
+    try:
+        if os.path.exists(acc) and os.path.getmtime(acc) >= os.path.getmtime(src) - 1:
+            return acc, {"accept": "cache"}
+    except OSError:
+        pass
+    if ext not in ("docx", "docm", "doc", "rtf"):
+        return src, {"accept": "skip"}
+    if ext in ("docx", "docm") and not _docx_has_revisions(src):
+        return src, {"accept": "none"}      # 无修订：零开销跳过 COM
+    try:
+        import win32com.client as _wc
+        word = _wc.DispatchEx("Word.Application")
+    except Exception as e:
+        return src, {"accept": f"fail({type(e).__name__})"}
+    word.Visible = False
+    word.DisplayAlerts = 0
+    try:
+        doc = word.Documents.Open(os.path.abspath(src), ReadOnly=False, AddToRecentFiles=False)
+        if doc.TrackRevisions:
+            doc.TrackRevisions = False
+        n_rev = doc.Revisions.Count
+        if n_rev:
+            # 安心养老图三事故（2026-10-10 实证）：浮动图锚在被删修订文字上时，
+            # AcceptAllRevisions 会连图一起删（Shapes 6→5，架构图消失）。
+            # 保护：accept 前存档全部浮动 Shape（名单+锚段文本+EMF），
+            # accept 后按名单差集找出消失者，回插内嵌图到锚段等价位置。
+            import collections as _col
+            before = []
+            for _i in range(1, doc.Shapes.Count + 1):
+                try:
+                    _s = doc.Shapes(_i)
+                    before.append(dict(name=_s.Name, ctx=_shape_anchor_text(_s),
+                                       emf=_shape_emf(word, _s)))
+                except Exception:
+                    continue
+            doc.AcceptAllRevisions()
+            after = _col.Counter()
+            try:
+                for _i in range(1, doc.Shapes.Count + 1):
+                    after[doc.Shapes(_i).Name] += 1
+            except Exception:
+                pass
+            lost_names = list((_col.Counter(b["name"] for b in before) - after).elements())
+            if lost_names:
+                used = set()
+                restored = 0
+                for b in before:
+                    if b["name"] in lost_names and before.count(b) and (b["name"], b["ctx"]) not in used:
+                        used.add((b["name"], b["ctx"]))
+                        restored += _reinsert_lost_shape(doc, b, s1)
+                print(f"  [accept] 警告：接受修订连带删除 {len(lost_names)} 个浮动图"
+                      f"（{','.join(lost_names)}），已回插 {restored} 个内嵌图", flush=True)
+        doc.SaveAs2(os.path.abspath(acc), FileFormat=16)    # 16 = wdFormatXMLDocument (.docx)
+        doc.Close(False)
+        return acc, {"accept": f"accepted({n_rev}处)" if n_rev else "accepted(0处)"}
+    except Exception as e:
+        return src, {"accept": f"fail({type(e).__name__}: {str(e)[:80]})"}
+    finally:
+        try:
+            word.Quit()
+        except Exception:
+            pass
+
+
 def stage1(src, wd, cfg):
     """前置手术 → conv docx（缓存：stage1/s4_<stem>.docx；s4_=Word整块截图版手术产物）
 
@@ -225,16 +366,30 @@ def stage1(src, wd, cfg):
     """
     precheck(src)
     s1 = os.path.join(wd, "stage1")
+    os.makedirs(s1, exist_ok=True)
+    info = {"tabs": 0, "math": 0, "flat": None, "skipped": False}
+    # P0 修订终稿化（2026-10-10）：第一步统一接受所有修订，后续全部阶段都在终稿上分析
+    src, acc_info = accept_revisions(src, s1)
+    info.update(acc_info)
+    info["final_src"] = src
     stem = os.path.splitext(os.path.basename(src))[0]
     snap_path = os.path.join(s1, "snap_" + stem + ".docx")
     cached = os.path.join(s1, "s4_" + stem + ".docx")
     if os.path.exists(cached):
+        # 2026-10-12 修"源文件改完重转还是旧货"（问题清单 #4）：s4_ 缓存此前只看存在性、
+        # 不看新鲜度——上次转换失败留下的缓存，源文件改完照样命中。规则与 stage2 对齐：
+        # 缓存比当前输入（修订终稿/原文件）旧（留 2s 容忍文件系统时间精度）→ 作废重做。
+        try:
+            stale = os.path.getmtime(cached) < os.path.getmtime(src) - 1
+        except OSError:
+            stale = False
         jpath = os.path.join(s1, "stage1.json")
-        if os.path.exists(jpath):
+        if os.path.exists(jpath) and not stale:
             return cached, json.load(open(jpath, encoding="utf-8"))
-        os.remove(cached)        # 残局自愈：上次中途崩溃，有缓存无清单 → 重做
-    os.makedirs(s1, exist_ok=True)
-    info = {"tabs": 0, "math": 0, "flat": None, "skipped": False}
+        print("  [stage1] 缓存 s4_ 比源文件旧（源已修改）→ 作废重做", flush=True)
+        for dead in (cached, jpath):
+            if os.path.exists(dead):
+                os.remove(dead)
     snap_ok = False
     if cfg["surgery"].get("shape_snap", True):
         try:
@@ -316,7 +471,14 @@ def stage2(conv_src, wd, cfg):
     os.makedirs(s2, exist_ok=True)
     hit = [f for f in os.listdir(s2) if f.endswith(".html")]
     if hit:
-        return os.path.join(s2, hit[0]), True
+        hp = os.path.join(s2, hit[0])
+        # 2026-10-10 修缓存永不过期事故：stage1 截图手术重跑后 conv_src 变新，
+        # 旧 HTML 仍被复用（智慧政法看板错位查了半天其实是陈货）。
+        # 规则：HTML 比 conv_src 旧（留 2s 容忍文件系统时间精度）→ 作废重转。
+        if os.path.getmtime(hp) >= os.path.getmtime(conv_src) - 2:
+            return hp, True
+        os.remove(hp)
+        print("  [stage2] 缓存 HTML 比 stage1 产物旧 → 作废重转", flush=True)
     htm = lo_convert(conv_src, s2, _loprof(wd))
     return htm, False
 
@@ -446,7 +608,8 @@ def stage3(htm, wd, epub_path, unpack_dir, book_id, cfg, numbering_map=None):
     st = cfg.get("styles", {})
     secs, img_refs = cleanup_and_split(htm, wd,
                     img_max=int(st.get("img_max_width", 580)),
-                    numbering_map=numbering_map or {})
+                    numbering_map=numbering_map or {},
+                    styles_cfg=st)   # h1/h2/h3 字号/加粗按配置内联固化（2026-10-12）
     htmldir = os.path.dirname(htm)
     img_srcmap = {}
     for ref in img_refs:
@@ -565,12 +728,15 @@ def cmd_convert(args):
                     rec["status"] = "done_stage2"
                     rec["artifacts"] = dict(html=htm)
                 else:
-                    nmap, nvia = numbering_map_for(s1info.get("gate_src") or src, wd)
+                    # 闸门/编号基线优先级：截图产物 → 修订终稿 → 原始文件（终稿化后三方必须同源）
+                    base_src = s1info.get("gate_src") or s1info.get("final_src") or src
+                    nmap, nvia = numbering_map_for(base_src, wd)
                     rec["numbering_via"] = nvia
                     r3 = stage3(htm, wd, epub_path, unpack, book_id, cfg, numbering_map=nmap)
                     rec.update(status="done", **r3)
                     if not args.no_gates:
-                        g = gate_l1l2(s1info.get("gate_src") or src, r3["unpacked"], cfg)
+                        base_src = s1info.get("gate_src") or s1info.get("final_src") or src
+                        g = gate_l1l2(base_src, r3["unpacked"], cfg)
                         rec["gate_l1l2"] = g
                         ec = gate_epubcheck(r3["epub"], cfg)
                         if ec: rec["gate_epubcheck"] = ec
@@ -580,6 +746,17 @@ def cmd_convert(args):
                             rec["status"] = "failed"
                             rec["err"] = (f"闸门未过: L1={g['l1']}%（下限 {cfg['gates']['l1_min']}%）"
                                           f" L2={g['l2']}")
+            # 大叔拍板 2026-10-10：转完即清中间产物——只要成功就删 stage1/html_v4/解包区，
+            # 绝不留缓存（否则 Word 源文件改了，下轮还吃旧缓存转出旧货）。失败保留现场排查。
+            if rec["status"] == "done":
+                import shutil as _sh
+                cleared = []
+                for sub in ("stage1", "stage2", "html_v4", "html_v3", unpack, "imgopt"):
+                    p = sub if os.path.isabs(sub) else os.path.join(wd, sub)
+                    if os.path.isdir(p):
+                        _sh.rmtree(p, ignore_errors=True)
+                        cleared.append(os.path.basename(p.rstrip("\\/")))
+                rec["cache_cleared"] = cleared
         except Exception as e:
             rec.update(status="failed", err=f"{type(e).__name__}: {e}")
         finally:
