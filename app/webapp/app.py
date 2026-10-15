@@ -268,7 +268,16 @@ def _up_to_date(rec: dict, src: str) -> bool:
     try:
         if not (ep and os.path.exists(ep) and src and os.path.exists(src)):
             return False
-        return os.path.getmtime(ep) >= os.path.getmtime(src) - 1
+        if os.path.getmtime(ep) < os.path.getmtime(src) - 1:
+            return False
+        # 代码新鲜度（2026-10-14"导航呢？"实证）：管线规则升级（pipeline/htmlpath_poc 改动）
+        # 比 EPUB 新 → 旧 EPUB 是旧规则产物，必须重转，不能断点跳过
+        _tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+        for _f in ("pipeline.py", "htmlpath_poc.py"):
+            _p = os.path.join(_tools, _f)
+            if os.path.exists(_p) and os.path.getmtime(_p) > os.path.getmtime(ep):
+                return False
+        return True
     except OSError:
         return False
 

@@ -92,12 +92,20 @@ td,th{{border:{st['table_border']};padding:4px 6px;vertical-align:top}}
 caption{{caption-side:top;font-weight:bold;padding:4px}}
 """
 
-def make_ncx(uid, title, secs):
-    """toc.ncx（EPUB2 兼容 + EPUB3 双导航合法；平台适配层预留）"""
-    nps = "\n".join(
-        f'    <navPoint id="np-{i}" playOrder="{i}"><navLabel><text>{(t or "文档")}</text></navLabel>'
-        f'<content src="sections/section{i:04d}.xhtml"/></navPoint>'
-        for i, (t, _) in enumerate(secs, 1))
+def make_ncx(uid, title, secs, nav_entries=None):
+    """toc.ncx（EPUB2 兼容 + EPUB3 双导航合法；平台适配层预留）。
+    nav_entries：4.88 目录识别导出的条目 [(text, href)]——有则优先用真目录
+    （href=section 文件相对名），阅读器侧边栏才显示全部条目；无则回落切章标题。"""
+    if nav_entries:
+        nps = "\n".join(
+            f'    <navPoint id="np-{i}" playOrder="{i}"><navLabel><text>{(t or "文档")}</text></navLabel>'
+            f'<content src="sections/{h}"/></navPoint>'
+            for i, (t, h) in enumerate([e for e in nav_entries if e[1]], 1))
+    else:
+        nps = "\n".join(
+            f'    <navPoint id="np-{i}" playOrder="{i}"><navLabel><text>{(t or "文档")}</text></navLabel>'
+            f'<content src="sections/section{i:04d}.xhtml"/></navPoint>'
+            for i, (t, _) in enumerate(secs, 1))
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
@@ -109,9 +117,16 @@ def make_ncx(uid, title, secs):
   </navMap>
 </ncx>'''
 
-def make_nav(titles):
-    lis = "\n".join(f'      <li><a href="sections/section{i:04d}.xhtml">{(t or "文档")}</a></li>'
-                    for i, (t, _) in enumerate(titles, 1))
+def make_nav(secs, nav_entries=None):
+    """nav.xhtml（EPUB3 导航，properties="nav"）。nav_entries 有则用识别目录（同 ncx）。"""
+    if nav_entries:
+        lis = "\n".join(
+            (f'      <li><a href="sections/{h}">{(t or "文档")}</a></li>' if h
+             else f'      <li>{(t or "文档")}</li>')
+            for t, h in nav_entries)
+    else:
+        lis = "\n".join(f'      <li><a href="sections/section{i:04d}.xhtml">{(t or "文档")}</a></li>'
+                        for i, (t, _) in enumerate(secs, 1))
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh">
@@ -160,7 +175,7 @@ def make_opf(uid, title, secs, img_files, version="3.0"):
   </spine>
 </package>'''
 
-def build_epub(epub_path, title, secs, img_srcmap, css, epub_version="3.0", img_renames=None):
+def build_epub(epub_path, title, secs, img_srcmap, css, epub_version="3.0", img_renames=None, nav_entries=None):
     if os.path.exists(epub_path):
         os.remove(epub_path)
     uid = str(uuid.uuid4())
@@ -174,8 +189,8 @@ def build_epub(epub_path, title, secs, img_srcmap, css, epub_version="3.0", img_
         ver = epub_version
         z.writestr("OEBPS/content.opf", make_opf(uid, title, secs, list(img_srcmap.keys()), ver))
         if not ver.startswith("2"):
-            z.writestr("OEBPS/nav.xhtml", make_nav(secs))
-        z.writestr("OEBPS/toc.ncx", make_ncx(uid, title, secs))
+            z.writestr("OEBPS/nav.xhtml", make_nav(secs, nav_entries))
+        z.writestr("OEBPS/toc.ncx", make_ncx(uid, title, secs, nav_entries))
         z.writestr("OEBPS/styles.css", css)
         for i, (t, inner) in enumerate(secs, 1):
             def rew(m):
@@ -384,9 +399,19 @@ def stage1(src, wd, cfg):
         except OSError:
             stale = False
         jpath = os.path.join(s1, "stage1.json")
-        if os.path.exists(jpath) and not stale:
-            return cached, json.load(open(jpath, encoding="utf-8"))
-        print("  [stage1] 缓存 s4_ 比源文件旧（源已修改）→ 作废重做", flush=True)
+        degraded = False
+        if os.path.exists(jpath):
+            jinfo = json.load(open(jpath, encoding="utf-8"))
+            # 2026-10-14 实证：snap 失败走 flatten 回落产出的 s4_ 是降级货（看板图缺失、
+            # L1/L2 闸门必挂），但 mtime 比 src 新——下轮照样命中，降级结果被接力固化。
+            # 缓存命中前先查 snap_err：降级缓存一律作废重做（现场文件保留供排查）。
+            degraded = bool(jinfo.get("snap_err"))
+            if not degraded:
+                return cached, jinfo
+        if not degraded:
+            print("  [stage1] 缓存 s4_ 比源文件旧（源已修改）→ 作废重做", flush=True)
+        else:
+            print("  [stage1] 缓存 s4_ 来自降级回落（上次 snap 失败）→ 作废重做", flush=True)
         for dead in (cached, jpath):
             if os.path.exists(dead):
                 os.remove(dead)
@@ -606,7 +631,7 @@ def numbering_map_for(gate_src, wd):
 def stage3(htm, wd, epub_path, unpack_dir, book_id, cfg, numbering_map=None):
     """cleanup + 切章 + 图片压缩 + 样式注入 + EPUB 组包 + 解包（解包只进 work 校验区，不占输出目录）"""
     st = cfg.get("styles", {})
-    secs, img_refs = cleanup_and_split(htm, wd,
+    secs, img_refs, nav_entries = cleanup_and_split(htm, wd,
                     img_max=int(st.get("img_max_width", 580)),
                     numbering_map=numbering_map or {},
                     styles_cfg=st)   # h1/h2/h3 字号/加粗按配置内联固化（2026-10-12）
@@ -624,7 +649,8 @@ def stage3(htm, wd, epub_path, unpack_dir, book_id, cfg, numbering_map=None):
                                               pixel_max=int(st.get("img_pixel_max", 1000)),
                                               quality=int(st.get("img_jpeg_quality", 82)))
     build_epub(epub_path, book_id, secs, img_srcmap, make_css(cfg["styles"]),
-              str(cfg.get("package", {}).get("epub_version", "3.0")), img_renames=renames)
+              str(cfg.get("package", {}).get("epub_version", "3.0")), img_renames=renames,
+              nav_entries=nav_entries or None)
     updir = unpack_dir
     old = updir + "_旧"
     if os.path.exists(updir):

@@ -14,7 +14,7 @@ styles:
   body_line_height: '1.9'
   body_color: '#111'
   h1_size: 1.3em
-  h1_color: '#8B0000'
+  h1_color: ''
   h1_bold: true
   h1_italic: false
   h2_size: 1.2em

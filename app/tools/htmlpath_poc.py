@@ -74,7 +74,7 @@ def lo_convert(src, outdir, profile, fmt="html"):
     return os.path.join(outdir, h[0])
 
 def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, styles_cfg=None):
-    """解析 LO HTML → 清理 → 按 h1 切章。返回 (sections:[(title, xhtml_str)], images:[src_file])
+    """解析 LO HTML → 清理 → 按 h1 切章。返回 (sections:[(title, xhtml_str)], images:[src_file], nav_entries:[(text, href)])
     img_max：图片内联锁定宽度的上限(px)，声明/实际宽超过它的图转纯流式 max-width:100%
     numbering_map：{规范化段文本: [Word 权威编号,...]}，用于 ol/li 拍平的字面编号（见 pipeline.build/extract）
     styles_cfg：config styles 块——h1/h2/h3 字号/加粗按配置内联固化（平台可能不加载 styles.css，
@@ -170,37 +170,45 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
         seq_i = best_j + 1
         return best or None          # 命中段但 Word 无编号 → None（不加号）
     li_plan = []                     # (li, marker) 文档序
+    plan_by_lst = {}                 # id(lst) -> [(li, marker)...] 列表内文档序
+    lst_order = []                   # 列表出现顺序（文档序）
     for lst in body.xpath("//ol|//ul"):
+        if id(lst) not in plan_by_lst:
+            plan_by_lst[id(lst)] = []
+            lst_order.append(lst)
         for li in lst.xpath("./li"):
-            li_plan.append((li, _seq_match(re.sub(r"\s+", "", li.text_content() or ""))))
-    for li, marker in reversed(li_plan):
-        lst = li.getparent()             # 所属 ol/ul
-        if lst is None:
-            continue
-        outer = lst.getparent()          # 插到 ol 的父层级（插进 ol 内会被"删空列表"连锅端）
+            marker = _seq_match(re.sub(r"\s+", "", li.text_content() or ""))
+            li_plan.append((li, marker))
+            plan_by_lst[id(lst)].append((li, marker))
+    # DOM 改写（2026-10-14 修表格内列表乱序）：列表按文档序倒序处理（嵌套先内后外），
+    # 但列表内 li 必须按文档序「正序」addprevious(lst) 逐个前插——原实现倒序搬移 +
+    # 每次重算 outer.index(lst)，先搬的段落在后续搬移时被压到后面（双重反转），
+    # 表1 单元格内 2. 排到 1. 前面（案例集 23-26 页表格错乱实证）。
+    for lst in reversed(lst_order):
+        outer = lst.getparent()      # 插到 ol 的父层级（插进 ol 内会被"删空列表"连锅端）
         if outer is None:
             continue
-        idx = outer.index(lst)
-        inner_ps = li.xpath("./p")
-        if not inner_ps:
-            np = li.makeelement("p", {})
-            if li.text:
-                np.text = li.text
-            for ch in list(li):
-                np.append(ch)
-            inner_ps = [np]
-        for p_el in reversed(inner_ps):
-            outer.insert(idx, p_el)
-        if marker:
-            first = inner_ps[0]
-            mspan = first.makeelement("span", {})
-            mspan.text = marker
-            first.insert(0, mspan)
-            if first.text:
-                # LO 的 p 首文本常带 \r\n\t 排版空白，编号后不能留（大叔拍板：序号后无大空隙）
-                mspan.tail = first.text.lstrip(" \t\r\n\u3000\u00a0")
-                first.text = None
-        lst.remove(li)
+        for li, marker in plan_by_lst[id(lst)]:
+            inner_ps = li.xpath("./p")
+            if not inner_ps:
+                np = li.makeelement("p", {})
+                if li.text:
+                    np.text = li.text
+                for ch in list(li):
+                    np.append(ch)
+                inner_ps = [np]
+            for p_el in inner_ps:
+                lst.addprevious(p_el)     # 逐个前插到 ol 之前，正序保序
+            if marker:
+                first = inner_ps[0]
+                mspan = first.makeelement("span", {})
+                mspan.text = marker
+                first.insert(0, mspan)
+                if first.text:
+                    # LO 的 p 首文本常带 \r\n\t 排版空白，编号后不能留（大叔拍板：序号后无大空隙）
+                    mspan.tail = first.text.lstrip(" \t\r\n\u3000\u00a0")
+                    first.text = None
+            lst.remove(li)
     for lst in body.xpath("//ol|//ul"):
         if not lst.xpath("./li"):
             lst.getparent().remove(lst)
@@ -291,13 +299,24 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
         # 图+图题/图文混排的拆段统一由 4.65 处理（此处的旧 br 方案已废弃，避免残留多余 <br/>）
         if src:
             images.append(src)
-    # 3) 表格：去 width 属性，CSS 统一管
-    for t in body.xpath("//table"):
-        for a in ("width", "cellpadding", "cellspacing", "border", "style"):
-            t.attrib.pop(a, None)
-    for td in body.xpath("//td|//th|//tr"):
-        for a in ("width", "height", "style", "valign"):
-            td.attrib.pop(a, None)
+    # 3) 表格固定样式内联（2026-10-14 大叔："表格还是完全不对"——根因与 4.9 标题同款：
+    #    平台不加载 styles.css，此前"去 width 属性，CSS 统一管"的假设在平台侧不成立，
+    #    表格裸奔 → 无边框/无列宽约束/列随内容乱挤。边框、列宽比例必须烤进标签。
+    #    统一格式原则：边框/内边距按管线统一值；列宽保留 LO 导出的百分比（源文档列比例），
+    #    px 绝对宽度丢弃（表格 width:100% 自适应屏宽）。
+    for t_el in body.xpath("//table"):
+        t_el.set("style", "width:100%;border-collapse:collapse;margin:.6em 0")
+        for a in ("width", "cellpadding", "cellspacing", "border", "dir", "bgcolor", "align"):
+            t_el.attrib.pop(a, None)
+    for c_el in body.xpath("//td|//th"):
+        w = c_el.get("width") or ""
+        wst = "width:" + w + ";" if w.endswith("%") else ""   # 列宽比例（首行 td 携带，作用全列）
+        c_el.set("style", wst + "border:0.5pt solid #444;padding:4px 6px;vertical-align:top")
+        for a in ("width", "height", "valign", "bgcolor"):
+            c_el.attrib.pop(a, None)
+    for tr in body.xpath("//tr"):
+        for a in ("width", "height", "style", "valign", "bgcolor"):
+            tr.attrib.pop(a, None)
     # 4) 去 <font> 解包（固定样式，不留字体垃圾）
     for f in body.xpath("//font"):
         f.drop_tag()
@@ -318,9 +337,13 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
     for a_el in body.xpath("//a[@name][not(@id)]"):
         a_el.set("id", a_el.get("name"))
         del a_el.attrib["name"]
-    # c2) Word 书签空锚点清除（大叔 2026-10-10：读者端把 _Toc 目录书签/_GoBack 光标位/
-    #     OLE_LINK 复制残留全列成"书签"）。仅清"无 href 且无可见内容"的空锚点，
-    #     带内容/带 href 的（脚注双向锚）保留；tail 并回前兄弟或父 text（remove 会丢 tail）。
+    # c2) Word 书签空锚点清理（2026-10-10 拍板 + 2026-10-14 补丁）：
+    #     空锚点（无 href 无内容）原样全清会把目录超链接的目标书签（_TocXXX）一起清掉，
+    #     切章时 id_map 查无此锚 → 目录 href 全被剥（案例集问题#1 实证）。
+    #     现规则：先收集全文 href="#..." 引用集；被引用的空锚点把 id 提升到宿主段落
+    #     （阅读器不会再把空 <a> 列成书签，链接目标不丢），宿主已有 id 时原锚保留；
+    #     未被引用的（_GoBack/OLE_LINK 残留）照旧清除。
+    _href_refs = {a_el.get("href")[1:] for a_el in body.xpath('//a[starts-with(@href,"#")]')}
     for a_el in body.xpath("//a[not(@href)]"):
         if "".join(a_el.itertext()).strip() or a_el.find(".//img") is not None:
             continue
@@ -329,6 +352,12 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
         par = a_el.getparent()
         if par is None:
             continue
+        aid = a_el.get("id")
+        if aid and aid in _href_refs:
+            if not par.get("id") and par is not body:
+                par.set("id", aid)          # id 提升到宿主段落（p/div），锚点即可删除
+            elif par is body or par.get("id"):
+                continue                    # 宿主已有 id / 锚点直接挂在 body：原锚保留
         if tail:
             if prev is not None:
                 prev.tail = (prev.tail or "") + tail
@@ -517,15 +546,17 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
     # 4.8) 一级标题提升（2026-10-12 问题清单 #2 实证）："一、二、三…"短段是案例文档的
     #   一级标题（源文件里是普通段落/自定义样式，不挂 Word Heading，LO 导出仍是 p）→
     #   全书一级标题格式不统一、目录缺失。统一提升为 h2（class 加 sec1），剥掉段内
-    #   font-weight:normal 残留（否则压掉标题加粗）并参与 5) 切章。居中段/含图表段不动。
+    #   font-weight:normal 残留（否则压掉标题加粗）并参与 5) 切章。
+    #   居中的序号段同样提升（2026-10-14 大叔"46页章节标题错误居中"实证：作者误把
+    #   小节标题「三、…」设了 jc=center，旧逻辑跳过 → 被 4.87 当居中块首段误提升成
+    #   文章标题）。序号段=小节标题是原理级判定，与对齐方式无关；提升时剥掉居中，
+    #   与同篇其他小节标题统一为左对齐缩进格式（不忠实还原原稿怪排版）。
     _SEC1_RE = re.compile(r"^[一二三四五六七八九十]{1,3}、")
     for p_el in body.xpath("//p"):
         if p_el.xpath("ancestor::td|ancestor::th|.//img|.//table"):
             continue
         t = re.sub(r"\s+", "", p_el.text_content())
         if not t or len(t) > 50 or not _SEC1_RE.match(t):
-            continue
-        if center_re.search(p_el.get("style") or ""):
             continue
         p_el.tag = "h2"
         p_el.set("class", ((p_el.get("class") or "") + " sec1").strip())
@@ -566,6 +597,166 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
                         lambda m: ";" if m.group(0).startswith(";") else "", st, flags=re.I)
             el.set("style", re.sub(r";{2,}", ";", st).strip("; "))
             break
+    # 4.87) 文章标题提升（2026-10-14 大叔：案例集一篇文档含多篇文章，各文章标题是
+    #   居中段没挂 Heading，塌成正文小字——居中保留正确，缺标题格式）。
+    #   规则（原理：居中连续块的「首段」是文章标题，紧随其后的居中短段是作者行）：
+    #   居中短段（≤50字、无图/表/br、非图表题注）且前一个非空兄弟不是居中段
+    #   （即它开启了一个新的居中块）→ 提升为 h2（4.9 给它配置字号/加粗，居中不缩进）。
+    #   「目录」标签段、已有 h1 的 4.85 主标题不在此列（主标题已提升，不再重复）。
+    def _prev_nonempty_sibling(el):
+        s = el.getprevious()
+        while s is not None:
+            if s.tag == "p" and not re.sub(r"\s+", "", s.text_content()):
+                s = s.getprevious()          # 空段/占位 <br> 段跳过
+                continue
+            return s
+        return None
+    # 图/表题注排除：源文件「图1企业级模型…」图N 后未必有空格/分隔符（CAPTION_RE 拦不住），
+    # 4.87 只对"已是居中段"做排除，放宽为只要 图N/表N 开头即题注（案例集误提升 8 个图题实证）
+    _CAP_ANY = re.compile(r"^[图表]\s*\d+")
+    for el in body.xpath("//p"):
+        if el.xpath("ancestor::td|ancestor::th|.//img|.//table|.//br"):
+            continue
+        t = re.sub(r"\s+", "", el.text_content())
+        if not t or len(t) > 50 or t in ("目录", "目錄"):
+            continue
+        if _CAP_ANY.match(el.text_content().strip()):
+            continue                          # 图/表题注行是 4.7 的居中段，不是文章标题
+        if _SEC1_RE.match(t):
+            continue                          # 序号段（一、二、…）是小节标题，走 4.8 sec1 路径
+                                              # （2026-10-14 双保险：4.8 已提升居中序号段，此处兜底）
+        if not center_re.search(el.get("style") or ""):
+            continue
+        prev = _prev_nonempty_sibling(el)
+        if prev is not None and prev.tag in ("p", "h1", "h2", "h3") \
+                and center_re.search(prev.get("style") or ""):
+            continue                          # 居中块的后续段（作者行等），不升级
+        el.tag = "h2"
+        el.set("class", ((el.get("class") or "") + " sec2").strip())
+    # 4.88) 目录自动识别 + 整段建链 + 导航锚点（2026-10-14 大叔需求）。
+    #   仅当文中存在「目录」标签段时激活——没有目录的单独文章什么都不做（不建链不挂牌）。
+    #   a) 识别：「目录/目 录」段为标签；其后按文档序的段落为条目候选，条目=文本（去尾部
+    #      页码）能匹配标题锚点，或已有可解析的内链且短（≤60字）；连续 3 段不匹配 → 块结束。
+    #   b) 整段建链：LO 按西文 run 边界把条目链接切断（「区块链</a><span>+</span>再贷款…」
+    #      实证，只有前两个字可点）——统一重建：unwrap 条目内所有 <a>，除行尾页码外整段
+    #      包进一个 <a href="#锚点">。锚点=原 href 目标（仍存在时）＞文本精确匹配＞唯一前缀匹配。
+    #   c) 标签：目录标签段 id=toc、条目段 id=toc-NN（检测导航/跳转用）；标题无 id 则生成。
+    def _uniq_id(base, used):
+        if base not in used:
+            used.add(base)
+            return base
+        k = 2
+        while f"{base}-{k}" in used:
+            k += 1
+        used.add(f"{base}-{k}")
+        return f"{base}-{k}"
+    _used_ids = set(body.xpath("//*/@id"))
+    head_ids = {}                     # 规范化标题文本 → 锚点 id（首个优先）
+    for h in body.xpath("//h1|//h2|//h3"):
+        ht = re.sub(r"\s+", "", h.text_content())
+        if not ht:
+            continue
+        if not h.get("id"):
+            h.set("id", _uniq_id("hd", _used_ids))
+        head_ids.setdefault(ht, h.get("id"))
+    _all_ids = set(_used_ids)
+    toc_label = None
+    _toc_nav = []                     # [(条目文本, 目标锚id, 条目段id)] → 5.6 解析为导航条目
+    for p_el in body.xpath("//p"):
+        if re.sub(r"\s+", "", p_el.text_content()) in ("目录", "目錄"):
+            toc_label = p_el
+            break
+    if toc_label is not None:
+        def _entry_target(p_el):
+            """条目 → (锚点id, 是否条目)。宁可少不可错。"""
+            full = re.sub(r"\s+", "", p_el.text_content())
+            if not full or len(full) > 60:
+                return None, False
+            t_m = re.sub(r"\d{1,4}$", "", full)          # 去尾部页码
+            # a) 已有可解析内链
+            for a_el in p_el.xpath(".//a[@href]"):
+                href = a_el.get("href", "")
+                if href.startswith("#") and href[1:] in _all_ids:
+                    return href[1:], True
+            # b) 文本精确匹配（去页码 → 原文 两试）
+            for cand in (t_m, full):
+                if cand in head_ids:
+                    return head_ids[cand], True
+            # c) 唯一前缀匹配（目录条目常截断/带引导符，如「北京市分行…项目」vs 标题「…项目案例」）
+            for cand in (t_m, full):
+                if len(cand) >= 6:
+                    hits = [v for k, v in head_ids.items() if k.startswith(cand)]
+                    if len(hits) == 1:
+                        return hits[0], True
+            # d) 去编号前缀再试（「1. 标题」型目录）
+            m = re.match(r"^(?:\d{1,2}[.、．]|[一二三四五六七八九十]{1,3}、)\s*", t_m)
+            if m and head_ids.get(t_m[m.end():]):
+                return head_ids[t_m[m.end():]], True
+            return None, False
+        toc_label.set("id", _uniq_id("toc", _used_ids))
+        # 条目重建链接：切到段边界（页码节点边界不干净时宁多包不拆元素）
+        def _relink_entry(p_el, target):
+            for a_el in p_el.xpath(".//a[@href]"):
+                a_el.drop_tag()
+            full = "".join(p_el.itertext())
+            m = re.search(r"\s+\d{1,4}\s*$", full)       # 页码必须与标题有空白分隔，防「2025年版」误切
+            cut_raw = m.start() if m else len(full)
+            segs, pos = [], 0
+            t = p_el.text or ""
+            if t:
+                segs.append([pos, pos + len(t), "text", t, ""]); pos += len(t)
+            for ch in p_el:
+                ct = "".join(ch.itertext())
+                tl = ch.tail or ""
+                segs.append([pos, pos + len(ct), "elem", ch, tl]); pos += len(ct) + len(tl)
+            bounds = sorted({s for s, e, k, n, l in segs} | {e for s, e, k, n, l in segs} | {len(full)})
+            cut = next((b for b in bounds if b >= cut_raw), len(full))
+            a_new = p_el.makeelement("a", {"href": "#" + target})
+            p_el.insert(0, a_new)
+            for s, e, kind, node, tl in segs:
+                if s >= cut:
+                    break
+                if kind == "text":
+                    # p_el.text 段：内段进 a_new.text，外段挂 a_new.tail（渲染在链接后）
+                    a_new.text = (a_new.text or "") + node[:cut - s]
+                    if e > cut:
+                        a_new.tail = (a_new.tail or "") + node[cut - s:]
+                    p_el.text = None
+                else:
+                    node.tail = None                     # tail 由本 seg 的 tl 统一重挂
+                    a_new.append(node)
+                    if tl:
+                        t_start = e - len(tl)            # tail 起点坐标
+                        if t_start >= cut:
+                            a_new.tail = (a_new.tail or "") + tl   # node 是链接内最后一个节点，a_new.tail 恰在其后
+                        else:
+                            node.tail = tl[:cut - t_start] or None
+                            if cut - t_start < len(tl):
+                                a_new.tail = (a_new.tail or "") + tl[cut - t_start:]
+        n_link = 0
+        _n_entry = 0
+        _miss = 0
+        ps_all = body.xpath("//p")
+        _start = ps_all.index(toc_label) + 1
+        for p_el in ps_all[_start:]:
+            if not re.sub(r"\s+", "", p_el.text_content()):
+                continue                                 # 空段不计 miss
+            tgt, is_entry = _entry_target(p_el)
+            if not is_entry:
+                _miss += 1
+                if _miss >= 3:
+                    break
+                continue
+            _miss = 0
+            _n_entry += 1
+            if not p_el.get("id"):
+                p_el.set("id", _uniq_id(f"toc-{_n_entry:02d}", _used_ids))
+            efull = re.sub(r"\s+", "", p_el.text_content())
+            etext = re.sub(r"\d{1,4}$", "", efull)[:60] or efull[:60]
+            _toc_nav.append((etext, tgt, p_el.get("id")))
+            if tgt:
+                _relink_entry(p_el, tgt)
+                n_link += 1
     # 4.9) 标题固定样式内联（2026-10-12 大叔复核拍板：结构对了还不够，格式必须按配置统一）：
     #   a) 字号/加粗内联固化——h1/h2/h3 此前全靠 styles.css，平台侧不加载样式表时
     #      标题塌成正文大小（图片内联锁宽同理，固定样式=硬要求）
@@ -671,6 +862,18 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
                         del a_el.attrib["href"]
                     elif tgt != si:
                         a_el.set("href", f"section{tgt + 1:04d}.xhtml#{frag}")
+    # 5.6) 导航条目解析（2026-10-14 大叔"导航呢？"实证）：4.88 只在内容层建了链接，
+    #    EPUB 导航文件（nav.xhtml/toc.ncx）还只按切章生成——单 section 长文档侧边栏是空的。
+    #    把识别出的目录条目解析成 (文本, "sectionNNNN.xhtml#锚点") 导出；无目标的条目
+    #    回指条目段自身锚点（toc-NN）；无目录文档导出空表（= 不建导航，单独文章场景）。
+    nav_entries = []
+    for etext, tgt, eid in _toc_nav:
+        href = None
+        if tgt and tgt in id_map:
+            href = f"section{id_map[tgt] + 1:04d}.xhtml#{tgt}"
+        elif eid and eid in id_map:
+            href = f"section{id_map[eid] + 1:04d}.xhtml#{eid}"
+        nav_entries.append((etext, href))
     # 序列化为 xhtml 片段
     out_secs = []
     for title, nodes in sections:
@@ -679,7 +882,7 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
             wrap.append(n)
         xhtml = etree.tostring(wrap, method="xml", encoding="unicode")
         out_secs.append((title, xhtml))
-    return out_secs, images
+    return out_secs, images, nav_entries
 
 def make_xhtml_doc(title, inner):
     t = title or "文档"
@@ -797,7 +1000,7 @@ def process(name):
         open(os.path.join(g, "说明.txt"), "w", encoding="utf-8").write("LO 转换失败\n")
         return None
     # cleanup + 切章
-    secs, img_refs = cleanup_and_split(htm, wd)
+    secs, img_refs, _nav = cleanup_and_split(htm, wd)
     htmldir = os.path.dirname(htm)
     img_srcmap = {}
     for ref in img_refs:
@@ -806,7 +1009,7 @@ def process(name):
             img_srcmap[p] = os.path.basename(p)
     # 组包
     epub = os.path.join(g, "转换_" + os.path.splitext(mainf)[0] + ".epub")
-    build_epub(epub, name, secs, img_srcmap)
+    build_epub(epub, name, secs, img_srcmap, nav_entries=_nav or None)
     # 解包
     with zipfile.ZipFile(epub) as z:
         z.extractall(os.path.join(g, "epub解包"))
