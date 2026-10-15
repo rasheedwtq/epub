@@ -4,14 +4,24 @@
 
 docx2epub 是一个将 Microsoft Word（.docx/.doc/.rtf/.docm）转换为标准 EPUB 电子书的 Python 工具集，配套一个 Web 控制台用于批量管理和质检。
 
-### v0.3.0（2026-10-14）变更要点
+### v0.4.0（2026-10-15）变更要点
 
-- **EPUB 导航条目补全（"导航呢？"实证修复）**：4.88 已识别正文目录并建链接，但 nav.xhtml / toc.ncx 还只按切章生成——长文档单 section 侧边栏为空。现从 4.88 导出 nav_entries，优先用真目录填导航文件，阅读器侧边栏显示全部条目
-- **缓存降级固化修复**：snap 失败走 flatten 回落的 s4_ 缓存，mtime 比源新但结果是降级货（看板图缺失、L1/L2 必挂），下轮照样命中，问题接力固化。现检查 snap_err 字段，降级缓存一律作废重做
-- **代码新鲜度校验（断点续跑）**：pipeline.htmlpath_poc 更新后，旧 EPUB 是旧规则产物，不应被跳过。现在比对 tools/ 源码 mtime vs EPUB mtime，源码更新时强制重转
-- **表格样式内联**：平台不加载 styles.css，此前"去 width 属性，CSS 统一管"假设在平台侧不成立，表格裸奔无边框/无列宽约束。现统一内联边框、内边距、列宽比例（保留 LO 百分比，丢弃 px 绝对宽）
-- **列表拍平正序保序**：DOM 改写时 li→p 搬移原倒序处理，导致表格单元格内列表顺序反转（案例集 23-26 页实证）。改为列表倒序处理外层、列表内 li 正序 addprevious，保序
-- **h1_color 清空**：config.yaml 中 h1_color 由 '#8B0000' 改为空字符串，按平台统一样式规则处理
+- **BUG-001：块内公式（oMathPara）导出错位**：OMaths 逐个枚举时，同段含多个 oMath 导致导出 N 张图只有 1 个替换槽位。改为按段整体导出一次（整段作为公式图片），与 surgery 侧替换粒度严格一一对应
+- **BUG-002：导航/OPF 文本未转义**：标题含 `& < >` 时产出非法 XML。引入 `xml.sax.saxutils.escape` 对 nav/ncx/opf 所有文本和 href 字段转义；htmlpath_poc.py 的 `make_xhtml_doc` 同步引入并支持 `xhtml11` 开关（EPUB2 校验规则要求）
+- **BUG-003：stale 死代码导致缓存永不作废**：源文件改后 stale 计算结果从未参与判断，s4_ 缓存始终命中。补齐新鲜度检查，stale 或 degraded 任一命中即作废
+- **BUG-004：config.yaml 变更不触发重转**：配置中心改样式/闸门参数后，断点续跑照跳 EPUB。补 config.yaml mtime vs EPUB mtime 比对
+- **BUG-005：NCX dtb:uid 与 OPF identifier 不匹配**：OPF 用 `urn:uuid:<uid>` 而 ncx 只写裸 uid，epubcheck 报"identifier does not match"。ncx 入参改为 `"urn:uuid:" + uid`
+- **BUG-006（根除）：组包双实现漂移**：htmlpath_poc.py 与 pipeline.py 各有一套 make_nav/make_opf/build_epub，不同步产生差异。砍除 htmlpath_poc.py 中的组包函数，统一走 pipeline.py
+- **BUG-007：worker 无 try/finally 永久卡死**：未捕获异常（磁盘写满、Popen 失败等）使 BATCH.running 永久 True，前端一切操作 409。加 try/finally 包整个 worker 循环
+- **BUG-009：manifest 半行/坏行致任务历史 500**：json.loads 异常冒泡整页崩溃。逐行 try/except 跳过坏行
+- **BUG-010：soffice 路径写死 C 盘**：安装在其他盘符时 LO 转换全部失败。改用 shutil.which 查找 PATH，回落到 x86 常见路径
+- **BUG-012：同名图片静默互覆**：文档同时含 image.png 与 image.jpg，前者转 JPEG 后直接覆盖后者。新增 `_uniq()` 级联避让直到名字空闲
+- **BUG-013：跨 attempt 输出持久化**：首次尝试的输出残留到第二次 attempt，取到的 rec 是上一次的结果。out 变量移到 attempt 循环外清空
+- **BUG-015："目录"标签段污染主标题**：4.87 已排除而 4.85 漏了，居中"目录"被提升成 h1，与 4.88 目录识别抢同一段，污染 `<title>`。补全排除
+- **BUG-016：before.count(b) 守卫恒真**：dict 相等计数，b 自身恒 ≥1，去重判断形同虚设。删掉此守卫，保留 (name, ctx) used 集合即可
+- **EPUB2 img alt="" 补全**：epubcheck RSC-005 要求 img 必须有 alt 属性，LO 产出的 img 一律无 alt。正则自动补 `alt=""`
+- **EPUB2 package xml:lang 剥离**：EPUB2 校验规则不接受 `<package>` 上的 xml:lang 属性（RSC-005），版本分流——EPUB3 保留，EPUB2 去掉（语言信息由 dc:language 承载）
+- **表格样式内联（v0.3.0 延续）**：边框、内边距、列宽比例统一烤进标签，platform 不加载 styles.css 假设继续生效
 
 ### 核心流程
 

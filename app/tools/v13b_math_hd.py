@@ -34,8 +34,24 @@ def export_math_pngs(docx_path, outdir, scale=6):
             return []
         try:
             n = d.OMaths.Count
+            # 2026-10-15 修 BUG-001（导出侧配套）：块内公式（oMathPara）按"段"导出一次——
+            # OMaths 集合逐个枚举 oMath，而 surgery 侧按段整体替换，段内含 N 个 oMath 时
+            # 导出 N 张图只有 1 个槽位，后续公式全部错位。这里对同段的第二个及以后的
+            # oMath 跳过往（随段整体导出），保证导出粒度 = 替换粒度，两侧严格一一对应。
+            seen_para = set()
             for i in range(1, n + 1):
-                d.OMaths.Item(i).Range.CopyAsPicture()
+                rng = d.OMaths.Item(i).Range
+                target = rng
+                try:
+                    para = rng.Paragraphs(1).Range
+                    if "<m:oMathPara" in (para.XML or ""):
+                        if para.Start in seen_para:
+                            continue
+                        seen_para.add(para.Start)
+                        target = para   # 整段作为一个公式图片
+                except Exception:
+                    pass
+                target.CopyAsPicture()
                 win32clipboard.OpenClipboard()
                 try:
                     data = win32clipboard.GetClipboardData(win32clipboard.CF_ENHMETAFILE)
@@ -82,24 +98,26 @@ def surgery_docx(src_docx, dst_docx, math_pngs):
     tabs = doc.count("<w:tab/>")
     if tabs:
         doc = doc.replace("<w:tab/>", '<w:t xml:space="preserve">\u00a0\u00a0\u00a0\u00a0</w:t>')
-    # 公式替换（oMathPara 优先，再独立 oMath）
+    # 公式替换（2026-10-15 修 BUG-001）：单轮按文档序消费——
+    # export_math_pngs 按 d.OMaths 文档序导出（行内公式与块内 oMathPara 混合），
+    # 旧实现"先 oMathPara 后独立 oMath"两轮消费：行内公式在前时 PNG 全部错位；
+    # 且 oMathPara 内含 N 个 oMath 只替换 1 张图，其余行随正则整体消失、无回退。
+    # 单轮正则以文档序匹配（oMathPara 放交替首位，整段含内部 oMath 一并吃掉），
+    # 与导出顺序一一对应。PNG 数量不一致时只替换前 N 个，其余留 OMML 交 LO 低清兜底。
     replaced = 0
     def drawing(i, png, emu_w, emu_h):
         return DRAWING_TMPL.format(cx=emu_w, cy=emu_h, did=1000 + i, rid=f"rIdMathHD{i}")
     if math_pngs:
-        # 1) oMathPara（含内部 oMath 一并消失）
-        parts = re.split(r'(<m:oMathPara>.*?</m:oMathPara>)', doc, flags=re.S)
+        parts = re.split(r'(<m:oMathPara>.*?</m:oMathPara>|<m:oMath>.*?</m:oMath>)', doc, flags=re.S)
+        n_formula = (len(parts) - 1) // 2
+        if n_formula != len(math_pngs):
+            print(f"  [mathHD] 警告：文档公式元素 {n_formula} 个 ≠ 导出 PNG {len(math_pngs)} 个，"
+                  f"按文档序替换前 {min(n_formula, len(math_pngs))} 个，其余留 OMML 兜底", flush=True)
         for k in range(1, len(parts), 2):
-            if replaced < len(math_pngs):
-                replaced += 1
-                parts[k] = drawing(*((replaced,) + math_pngs[replaced-1]))
-        doc = "".join(parts)
-        # 2) 独立 oMath
-        parts = re.split(r'(<m:oMath>.*?</m:oMath>)', doc, flags=re.S)
-        for k in range(1, len(parts), 2):
-            if replaced < len(math_pngs):
-                replaced += 1
-                parts[k] = drawing(*((replaced,) + math_pngs[replaced-1]))
+            if replaced >= len(math_pngs):
+                break
+            replaced += 1
+            parts[k] = drawing(replaced, *math_pngs[replaced - 1])
         doc = "".join(parts)
     # rels / content-types / media
     relname = "word/_rels/document.xml.rels"

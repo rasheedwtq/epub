@@ -20,6 +20,20 @@ def _opaque(im):
     return im.mode in ('L', 'RGB', 'CMYK', 'YCbCr', 'I', 'F')
 
 
+def _uniq(outdir, name):
+    """2026-10-15 修 BUG-012：outdir 已存在同名文件时原样 save 会静默互覆——
+    典型场景：文档同时含 image.png 与 image.jpg，前者转 JPEG 时把后者冲掉。
+    级联避让直到名字空闲。"""
+    cand = os.path.join(outdir, name)
+    if not os.path.exists(cand):
+        return cand
+    stem, ext = os.path.splitext(name)
+    k = 2
+    while os.path.exists(os.path.join(outdir, f"{stem}_{k}{ext}")):
+        k += 1
+    return os.path.join(outdir, f"{stem}_{k}{ext}")
+
+
 def optimize_image(path, outdir, pixel_max=1000, quality=82, transcode_min_kb=30):
     """返回优化后的文件路径（可能换扩展名 .jpg）；无需优化返回原路径。"""
     try:
@@ -38,14 +52,14 @@ def optimize_image(path, outdir, pixel_max=1000, quality=82, transcode_min_kb=30
         resized = True
     kb = os.path.getsize(path) / 1024
     if fmt in ('PNG', 'GIF') and _opaque(im) and kb >= transcode_min_kb:
-        new = os.path.join(outdir, stem + '.jpg')
+        new = _uniq(outdir, stem + '.jpg')
         try:
             im.convert('RGB').save(new, 'JPEG', quality=quality, optimize=True)
             return new
         except Exception:
             pass
     if resized:
-        new = os.path.join(outdir, base)
+        new = _uniq(outdir, base)
         try:
             if fmt == 'PNG':
                 im.save(new, 'PNG', optimize=True)

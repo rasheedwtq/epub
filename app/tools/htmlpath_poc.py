@@ -1,24 +1,39 @@
 # -*- coding: utf-8 -*-
-"""A1′ 最小链路 PoC：前置手术 → LO→HTML → cleanup → 自建 EPUB3 组包
-修复 V-11 六类问题中的 5 类：
-  #1 切章   → 自组包按 h1 切分，不按渲染分页
+"""htmlpath_poc.py — 纯函数库（前身：A1′ 最小链路 PoC）
+2026-10-15 大叔拍板砍除 PoC 组包链（make_nav/make_opf/build_epub/process/main/find_main），
+组包唯一实现在 pipeline.py（根治 BUG-006 双实现漂移）。本文件仅保留生产链路消费的函数：
+surgery_tab / lo_convert / cleanup_and_split / make_xhtml_doc / NOTE_RE（+内部依赖）。
+历史出身（V-11 六类问题的 5 类修复均在本文件的手术/清洗函数里沉淀）：
+  #1 切章   → cleanup_and_split 按 h1 切分，不按渲染分页
   #2 表格   → CSS width:100% + border-collapse，无视口溢出
   #3 图表   → LO HTML 自动栅格化
   #4 文本框 → LO HTML 文字存活
   #6 tab    → 前置手术替换为空格（U+00A0）
-#5 公式   → HTML 路径栅格化出现（低清，V-13b 待修）
-输出：D:/project/epub/review_samples_html/<样本名>/
+#5 公式   → HTML 路径栅格化（低清，V-13b 高清路线在 v13b_math_hd.py）
 """
 import os, re, sys, shutil, subprocess, zipfile, time
 from urllib.parse import unquote
 from lxml import html as LH
 from lxml import etree
+from xml.sax.saxutils import escape as _xesc  # 2026-10-15 修 BUG-002：组包文本未转义
 
 ROOT = r"D:\project\epub"
 S = os.path.join(ROOT, "tests")
 OUT = os.path.join(ROOT, "review_samples_html")
 TMP = os.path.join(ROOT, "work", "htmlpath_poc")
-SOFFICE = r"C:\Program Files\LibreOffice\program\soffice.exe"
+# 2026-10-15 修 BUG-010：soffice 路径不再写死安装盘符——PATH 里能找到就用，
+# 找不到回落常见安装位置（与 pipeline.py 的 config paths.soffice 口径一致）。
+def _find_soffice():
+    p = shutil.which("soffice")
+    if p:
+        return p
+    for c in (r"C:\Program Files\LibreOffice\program\soffice.exe",
+              r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"):
+        if os.path.exists(c):
+            return c
+    return "soffice"
+
+SOFFICE = _find_soffice()
 # 编辑待办备注（"麻烦将正文中脚注加到此处小看板中"）：cleanup 删段、L1 闸门同步剔除共用。
 #   注意 .* 收尾——备注常以"小看板中"结尾，(?:小看板|加到此处) 后还有字，fullmatch 必须留尾巴
 NOTE_RE = re.compile(r"(?:麻烦|请)将.{0,80}(?:小看板|加到此处).*", re.S)
@@ -34,11 +49,6 @@ table{width:100%;border-collapse:collapse;margin:.6em 0}
 td,th{border:.5pt solid #444;padding:4px 6px;vertical-align:top}
 caption{caption-side:top;font-weight:bold;padding:4px}
 """
-
-def find_main(d):
-    cands = [f for f in os.listdir(d) if f.lower().endswith((".docx", ".doc", ".rtf", ".docm"))]
-    cands.sort(key=lambda f: (not f.startswith(os.path.basename(d)[:3]), len(f)))
-    return cands[0] if cands else None
 
 def surgery_tab(src_docx, dst_docx):
     """前置手术：把 <w:tab/> 替换为 4 个 U+00A0（保留 xml:space）。返回替换个数。"""
@@ -587,7 +597,9 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
             if el.xpath("ancestor::td|ancestor::th|.//img|.//table|.//br"):
                 continue
             t = re.sub(r"\s+", "", el.text_content())
-            if not t or len(t) > 50:
+            # 2026-10-15 修 BUG-015：排除「目录」标签段——4.87 已排除而 4.85 漏了，
+            # 居中"目录"曾被提升成 h1 主标题，与 4.88 目录识别抢同一段、污染 <title>。
+            if not t or len(t) > 50 or t in ("目录", "目錄"):
                 continue
             if not center_re.search(el.get("style") or ""):
                 continue
@@ -884,165 +896,26 @@ def cleanup_and_split(html_path, workdir, img_max=580, numbering_map=None, style
         out_secs.append((title, xhtml))
     return out_secs, images, nav_entries
 
-def make_xhtml_doc(title, inner):
-    t = title or "文档"
+def make_xhtml_doc(title, inner, xhtml11=False):
+    """xhtml11=True 时按 XHTML 1.1 版式声明输出（EPUB2 校验规则要求；
+    EPUB3 保持 HTML5 doctype + meta charset，两者都是各自版本下的合法首选）。"""
+    t = _xesc(title or "文档")
+    if xhtml11:
+        doctype = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'
+        meta = '<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>'
+    else:
+        doctype = "<!DOCTYPE html>"
+        meta = '<meta charset="utf-8"/>'
     return f'''<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
+{doctype}
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh">
-<head><meta charset="utf-8"/><title>{t}</title><link rel="stylesheet" type="text/css" href="../styles.css"/></head>
+<head>{meta}<title>{t}</title><link rel="stylesheet" type="text/css" href="../styles.css"/></head>
 <body>
 {inner}
 </body>
 </html>'''
 
-def make_nav(titles):
-    lis = "\n".join(f'      <li><a href="sections/section{i:04d}.xhtml">{(t or "文档")}</a></li>'
-                    for i, (t, _) in enumerate(titles, 1))
-    return f'''<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh">
-<head><meta charset="utf-8"/><title>目录</title><link rel="stylesheet" type="text/css" href="styles.css"/></head>
-<body>
-  <nav epub:type="toc" id="toc">
-    <h1>目录</h1>
-    <ol>
-{lis}
-    </ol>
-  </nav>
-</body>
-</html>'''
-
-def make_opf(uid, title, secs, img_files, has_nav=True):
-    man = ['    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
-           '    <item id="css" href="styles.css" media-type="text/css"/>']
-    for i, _ in enumerate(secs, 1):
-        man.append(f'    <item id="s{i:04d}" href="sections/section{i:04d}.xhtml" media-type="application/xhtml+xml"/>')
-    seen = {}
-    for j, f in enumerate(img_files):
-        ext = os.path.splitext(f)[1].lower().lstrip(".") or "gif"
-        mt = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "svg": "image/svg+xml"}.get(ext, "application/octet-stream")
-        key = f"img{j:03d}"
-        seen[f] = key
-        man.append(f'    <item id="{key}" href="images/{os.path.basename(f)}" media-type="{mt}"/>')
-    spine = "\n".join(f'    <itemref idref="s{i:04d}"/>' for i in range(1, len(secs) + 1))
-    return f'''<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid" xml:lang="zh">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="uid">urn:uuid:{uid}</dc:identifier>
-    <dc:title>{title}</dc:title>
-    <dc:language>zh</dc:language>
-    <meta property="dcterms:modified">{time.strftime("%Y-%m-%dT%H:%M:%SZ")}</meta>
-  </metadata>
-  <manifest>
-{chr(10).join(man)}
-  </manifest>
-  <spine>
-{spine}
-  </spine>
-</package>''', seen
-
-def build_epub(epub_path, title, secs, img_srcmap):
-    if os.path.exists(epub_path):
-        os.remove(epub_path)
-    with zipfile.ZipFile(epub_path, "w") as z:
-        z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", zipfile.ZIP_STORED)
-        z.writestr("META-INF/container.xml", '''<?xml version="1.0" encoding="utf-8"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
-</container>''')
-        import uuid
-        opf, seen = make_opf(str(uuid.uuid4()), title, secs, list(img_srcmap.keys()))
-        z.writestr("OEBPS/content.opf", opf)
-        z.writestr("OEBPS/nav.xhtml", make_nav(secs))
-        z.writestr("OEBPS/styles.css", CSS)
-        for i, (t, inner) in enumerate(secs, 1):
-            # 内文图片路径改写到 images/
-            def rew(m):
-                old = m.group(1)
-                return f'src="../images/{os.path.basename(img_srcmap.get(unquote(old), unquote(old)))}"'
-            inner2 = re.sub(r'src="([^"]+)"', rew, inner)
-            z.writestr(f"OEBPS/sections/section{i:04d}.xhtml", make_xhtml_doc(t, inner2))
-        for src, dst in img_srcmap.items():
-            z.writestr(f"OEBPS/images/{os.path.basename(dst)}", open(src, "rb").read())
-
-def process(name):
-    srcdir = os.path.join(S, name)
-    mainf = find_main(srcdir)
-    g = os.path.join(OUT, name)
-    if os.path.isdir(g):
-        shutil.rmtree(g)
-    os.makedirs(g)
-    if not mainf:
-        open(os.path.join(g, "说明.txt"), "w", encoding="utf-8").write("无主文件\n")
-        return None
-    src = os.path.join(srcdir, mainf)
-    shutil.copy2(src, os.path.join(g, "原始_" + mainf))
-    wd = os.path.join(TMP, name)
-    shutil.rmtree(wd, ignore_errors=True)
-    os.makedirs(wd)
-    # 前置手术（仅 docx）：tab 替换 + 公式高清化替换
-    tabs, math_replaced = 0, 0
-    conv_src = src
-    if mainf.lower().endswith(".docx"):
-        try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from v13b_math_hd import export_math_pngs, surgery_docx
-            math_pngs = export_math_pngs(src, os.path.join(TMP, name, "math"))
-            conv_src = os.path.join(wd, "surgery_" + mainf)
-            tabs, math_replaced = surgery_docx(src, conv_src, math_pngs)
-        except Exception as e:
-            conv_src = src
-            tabs, math_replaced = -1, -1
-    # LO→HTML
-    prof = "file:///" + os.path.join(TMP, "_prof_" + name).replace("\\", "/")
-    htm = lo_convert(conv_src, os.path.join(wd, "html"), prof)
-    if not htm:
-        open(os.path.join(g, "说明.txt"), "w", encoding="utf-8").write("LO 转换失败\n")
-        return None
-    # cleanup + 切章
-    secs, img_refs, _nav = cleanup_and_split(htm, wd)
-    htmldir = os.path.dirname(htm)
-    img_srcmap = {}
-    for ref in img_refs:
-        p = os.path.join(htmldir, unquote(ref))
-        if os.path.exists(p) and p not in img_srcmap:
-            img_srcmap[p] = os.path.basename(p)
-    # 组包
-    epub = os.path.join(g, "转换_" + os.path.splitext(mainf)[0] + ".epub")
-    build_epub(epub, name, secs, img_srcmap, nav_entries=_nav or None)
-    # 解包
-    with zipfile.ZipFile(epub) as z:
-        z.extractall(os.path.join(g, "epub解包"))
-    note = (f"源: {mainf}\n管线: 前置手术(tab替换={tabs}, 公式高清替换={math_replaced}) → LO→HTML → cleanup(img居中/表格百分比) → 自建EPUB3\n"
-            f"切章: {len(secs)} 个 section（按 h1，无 h1 则单章）\n图片: {len(img_srcmap)} 张\n"
-            f"修复对照: #1切章=自控 #2表格=CSS百分比 #3图表=栅格化 #4文本框=文字存活 #5公式=Word高清 #6tab=前置替换\n")
-    open(os.path.join(g, "说明.txt"), "w", encoding="utf-8").write(note)
-    shutil.rmtree(wd, ignore_errors=True)
-    return dict(name=name, src=mainf, secs=len(secs), imgs=len(img_srcmap), tabs=tabs, math=math_replaced, ok=True)
-
-def main():
-    names = sys.argv[1:] or ["001_文字混合_低_规范", "004_图表混合_高_很脏", "005_图片混合_高_很脏",
-                             "006_表格混合_高_很脏", "007_脚注混合_中_很脏", "008_文字混合_高_极端脏",
-                             "013_列表混合_低_轻微脏", "015_混合_高_极端脏"]
-    os.makedirs(OUT, exist_ok=True)
-    rows = []
-    for n in names:
-        try:
-            r = process(n)
-        except Exception as e:
-            r = dict(name=n, ok=False, err=f"{type(e).__name__}: {e}")
-        rows.append(r)
-        print(r)
-    with open(os.path.join(OUT, "README_检查指引.md"), "w", encoding="utf-8") as f:
-        f.write("# 肉眼检查样本包 · A1′ 修复版（HTML 路径 + 自建 EPUB3）\n\n")
-        f.write("对照旧包 `review_samples\\`（EPUB 滤镜直转，有 6 类问题）。\n\n")
-        f.write("| 样本 | 源 | 切章 | 图片 | tab替换 | 公式高清 | 状态 |\n|---|---|---|---|---|---|---|\n")
-        for r in rows:
-            if r and r.get("ok"):
-                f.write(f"| {r['name']} | {r['src']} | {r['secs']} | {r['imgs']} | {r['tabs']} | {r['math']} | ✅ |\n")
-            else:
-                f.write(f"| {r['name'] if r else '?'} | - | - | - | - | - | ❌ {r.get('err','') if r else ''} |\n")
-        f.write("\n重点检查：001 不再乱切章；006 十列表第10列可见+右边框；004 图表在；005/015 文本框文字在；008 tab 缩进保留；013 列表正常。\n")
-
-if __name__ == "__main__":
-    main()
+# 2026-10-15（大叔拍板）：PoC 组包链整体砍除——make_nav/make_opf/build_epub/process/main/find_main。
+# 全项目消费面核查：仅 pipeline.py import 本文件的 surgery_tab/lo_convert/cleanup_and_split/make_xhtml_doc/NOTE_RE，
+# webapp/app.py 只盯本文件 mtime 做 _up_to_date 新鲜度，均不碰组包。组包唯一实现收敛在 pipeline.py，
+# 根治 BUG-006 双实现漂移。

@@ -123,7 +123,12 @@ def root_info():
 def tasks(limit: int = 30):
     if not MANIFEST.exists(): return []
     lines = MANIFEST.read_text(encoding="utf-8").strip().splitlines()
-    return [json.loads(l) for l in lines[-limit:]]
+    # 2026-10-15 修 BUG-009：manifest 半行/坏行此前让整个任务历史 500
+    rows = []
+    for l in lines[-limit:]:
+        try: rows.append(json.loads(l))
+        except Exception: pass
+    return rows
 
 # ---------------------------------------------------------------- 原生文件夹选择器 + EPUB 扫描（试读用）
 
@@ -277,62 +282,74 @@ def _up_to_date(rec: dict, src: str) -> bool:
             _p = os.path.join(_tools, _f)
             if os.path.exists(_p) and os.path.getmtime(_p) > os.path.getmtime(ep):
                 return False
+        # 2026-10-15 修 BUG-004：config.yaml 此前不在触达范围——配置中心改样式/闸门参数
+        # 后断点续跑照跳，改动永远到不了成品。补 config.yaml mtime 比对。
+        _cfgp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
+        if os.path.exists(_cfgp) and os.path.getmtime(_cfgp) > os.path.getmtime(ep):
+            return False
         return True
     except OSError:
         return False
 
 def _batch_worker(items: list, out_dir: str = ""):
-    out_root = out_dir or str(OUT)
-    skip_done = BATCH.get("skip_done", True)
-    done_map = manifest_latest() if skip_done else {}
-    for item in items:
-        src = item["src"]
-        if BATCH["cancel"]: break
-        bid = item["book_id"]
-        if skip_done and done_map.get(bid, {}).get("status") == "done":
-            if _up_to_date(done_map.get(bid, {}), src):
-                item.update(status="skipped", summary="断点续跑：已完成，跳过")
-                continue
-            BATCH["logs"].append(f"[新] {bid} — 源文件比上次产物新（改过），重转")
-        item.update(status="running")
-        rec = {}
-        for attempt in (1, 2):   # V-1 结论：失败自动重试 1 次（消化瞬时环境故障）
-            proc = subprocess.Popen([PY, str(APP / "tools" / "pipeline.py"), "convert", src,
-                                     "-c", str(CFG), "-o", out_root, "--book-id", bid],
-                                    cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            BATCH["proc"] = proc
+    # 2026-10-15 修 BUG-007：worker 主体此前无 try/finally——未捕获异常（如磁盘写满、
+    # Popen 失败）直接冲出线程，BATCH.running 永久卡在 True，前端一切操作 409。
+    try:
+        out_root = out_dir or str(OUT)
+        skip_done = BATCH.get("skip_done", True)
+        done_map = manifest_latest() if skip_done else {}
+        for item in items:
+            src = item["src"]
+            if BATCH["cancel"]: break
+            bid = item["book_id"]
+            if skip_done and done_map.get(bid, {}).get("status") == "done":
+                if _up_to_date(done_map.get(bid, {}), src):
+                    item.update(status="skipped", summary="断点续跑：已完成，跳过")
+                    continue
+                BATCH["logs"].append(f"[新] {bid} — 源文件比上次产物新（改过），重转")
+            item.update(status="running")
             rec = {}
-            try:
-                out, _ = proc.communicate(timeout=900)
-                for ln in out.decode("utf-8", "ignore").strip().splitlines():
-                    try: rec = json.loads(ln)
-                    except Exception: pass
-            except subprocess.TimeoutExpired:
-                _kill_tree(proc.pid)
-                rec = dict(status="failed", err="TimeoutExpired: 单本超时 900s 强杀")
-            if rec.get("status") == "done" or BATCH["cancel"]:
+            out = b""   # 2026-10-15 修 BUG-013：跨 attempt 持久化，避免取上一次尝试的输出
+            for attempt in (1, 2):   # V-1 结论：失败自动重试 1 次（消化瞬时环境故障）
+                proc = subprocess.Popen([PY, str(APP / "tools" / "pipeline.py"), "convert", src,
+                                         "-c", str(CFG), "-o", out_root, "--book-id", bid],
+                                        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                BATCH["proc"] = proc
+                rec = {}
+                try:
+                    out, _ = proc.communicate(timeout=900)
+                    for ln in out.decode("utf-8", "ignore").strip().splitlines():
+                        try: rec = json.loads(ln)
+                        except Exception: pass
+                except subprocess.TimeoutExpired:
+                    _kill_tree(proc.pid)
+                    rec = dict(status="failed", err="TimeoutExpired: 单本超时 900s 强杀")
+                if rec.get("status") == "done" or BATCH["cancel"]:
+                    break
+                if attempt == 1:
+                    BATCH["logs"].append(f"[重] {bid} — 首次失败（{rec.get('err') or '退出码 ' + str(proc.returncode)}），自动重试")
+            if rec.get("status") == "done":
+                g = rec.get("gate_l1l2") or {}
+                s = f"L1={g.get('l1')}% L2={g.get('l2')} 章{rec.get('sections')} 图{rec.get('imgs')}"
+                item.update(status="done", elapsed=rec.get("elapsed_s"), summary=s)
+                BATCH["logs"].append(f"[OK] {time.strftime('%H:%M:%S')} {bid} — {s}（{rec.get('elapsed_s')}s）")
+            elif BATCH["cancel"]:
+                item.update(status="canceled", summary="用户取消")
+                BATCH["logs"].append(f"[停] {bid} — 用户取消，剩余任务终止")
                 break
-            if attempt == 1:
-                BATCH["logs"].append(f"[重] {bid} — 首次失败（{rec.get('err') or '退出码 ' + str(proc.returncode)}），自动重试")
-        if rec.get("status") == "done":
-            g = rec.get("gate_l1l2") or {}
-            s = f"L1={g.get('l1')}% L2={g.get('l2')} 章{rec.get('sections')} 图{rec.get('imgs')}"
-            item.update(status="done", elapsed=rec.get("elapsed_s"), summary=s)
-            BATCH["logs"].append(f"[OK] {time.strftime('%H:%M:%S')} {bid} — {s}（{rec.get('elapsed_s')}s）")
-        elif BATCH["cancel"]:
-            item.update(status="canceled", summary="用户取消")
-            BATCH["logs"].append(f"[停] {bid} — 用户取消，剩余任务终止")
-            break
-        else:
-            g = rec.get("gate_l1l2") or {}
-            err = rec.get("err") or (f"闸门未过: L1={g.get('l1')}% L2={g.get('l2')}" if g
-                                     else f"退出码 {proc.returncode}")
-            tail = (out.decode("utf-8", "ignore") if 'out' in dir() else "")[-400:].strip()
-            item.update(status="failed", summary=err[:120])
-            BATCH["logs"].append(f"[ERR] {time.strftime('%H:%M:%S')} {bid} — {err[:160]}")
-            if tail and not rec.get("status"):
-                BATCH["logs"].append(f"[dbg] {bid} 输出尾部: {tail[-280:]}")
-    BATCH.update(running=False, proc=None, finished=time.strftime("%H:%M:%S"))
+            else:
+                g = rec.get("gate_l1l2") or {}
+                err = rec.get("err") or (f"闸门未过: L1={g.get('l1')}% L2={g.get('l2')}" if g
+                                         else f"退出码 {proc.returncode}")
+                tail = out.decode("utf-8", "ignore")[-400:].strip()
+                item.update(status="failed", summary=err[:120])
+                BATCH["logs"].append(f"[ERR] {time.strftime('%H:%M:%S')} {bid} — {err[:160]}")
+                if tail and not rec.get("status"):
+                    BATCH["logs"].append(f"[dbg] {bid} 输出尾部: {tail[-280:]}")
+    except Exception as e:
+        BATCH["logs"].append(f"[ERR] {time.strftime('%H:%M:%S')} worker 异常中断：{type(e).__name__}: {e}")
+    finally:
+        BATCH.update(running=False, proc=None, finished=time.strftime("%H:%M:%S"))
 
 def _normalize_srcs(srcs):
     """srcs 支持 str 或 {src, book_id} 两种形态 → 统一 items 结构（同名文件可显式 book_id 防覆盖）"""

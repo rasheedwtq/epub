@@ -25,6 +25,7 @@ from lxml import etree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from htmlpath_poc import surgery_tab, lo_convert, cleanup_and_split, make_xhtml_doc  # 复用已验证函数
+from xml.sax.saxutils import escape as _xesc  # 2026-10-15 修 BUG-002：导航/OPF 文本未转义，标题含 & < > 产出非法 EPUB
 
 DEFAULT_CONFIG = r"""# docx2epub 管线配置（配置中心数据源；改动后 --stage 3 即可生效）
 paths:
@@ -98,12 +99,12 @@ def make_ncx(uid, title, secs, nav_entries=None):
     （href=section 文件相对名），阅读器侧边栏才显示全部条目；无则回落切章标题。"""
     if nav_entries:
         nps = "\n".join(
-            f'    <navPoint id="np-{i}" playOrder="{i}"><navLabel><text>{(t or "文档")}</text></navLabel>'
-            f'<content src="sections/{h}"/></navPoint>'
+            f'    <navPoint id="np-{i}" playOrder="{i}"><navLabel><text>{_xesc(t or "文档")}</text></navLabel>'
+            f'<content src="sections/{_xesc(h)}"/></navPoint>'
             for i, (t, h) in enumerate([e for e in nav_entries if e[1]], 1))
     else:
         nps = "\n".join(
-            f'    <navPoint id="np-{i}" playOrder="{i}"><navLabel><text>{(t or "文档")}</text></navLabel>'
+            f'    <navPoint id="np-{i}" playOrder="{i}"><navLabel><text>{_xesc(t or "文档")}</text></navLabel>'
             f'<content src="sections/section{i:04d}.xhtml"/></navPoint>'
             for i, (t, _) in enumerate(secs, 1))
     return f'''<?xml version="1.0" encoding="utf-8"?>
@@ -111,7 +112,7 @@ def make_ncx(uid, title, secs, nav_entries=None):
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head><meta name="dtb:uid" content="{uid}"/><meta name="dtb:depth" content="1"/>
     <meta name="dtb:totalPageCount" content="0"/><meta name="dtb:maxPageNumber" content="0"/></head>
-  <docTitle><text>{title}</text></docTitle>
+  <docTitle><text>{_xesc(title)}</text></docTitle>
   <navMap>
 {nps}
   </navMap>
@@ -121,11 +122,11 @@ def make_nav(secs, nav_entries=None):
     """nav.xhtml（EPUB3 导航，properties="nav"）。nav_entries 有则用识别目录（同 ncx）。"""
     if nav_entries:
         lis = "\n".join(
-            (f'      <li><a href="sections/{h}">{(t or "文档")}</a></li>' if h
-             else f'      <li>{(t or "文档")}</li>')
+            (f'      <li><a href="sections/{_xesc(h)}">{_xesc(t or "文档")}</a></li>' if h
+             else f'      <li>{_xesc(t or "文档")}</li>')
             for t, h in nav_entries)
     else:
-        lis = "\n".join(f'      <li><a href="sections/section{i:04d}.xhtml">{(t or "文档")}</a></li>'
+        lis = "\n".join(f'      <li><a href="sections/section{i:04d}.xhtml">{_xesc(t or "文档")}</a></li>'
                         for i, (t, _) in enumerate(secs, 1))
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -155,15 +156,18 @@ def make_opf(uid, title, secs, img_files, version="3.0"):
         ext = os.path.splitext(f)[1].lower().lstrip(".") or "gif"
         mt = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
               "gif": "image/gif", "svg": "image/svg+xml"}.get(ext, "application/octet-stream")
-        man.append(f'    <item id="img{j:03d}" href="images/{os.path.basename(f)}" media-type="{mt}"/>')
+        man.append(f'    <item id="img{j:03d}" href="images/{_xesc(os.path.basename(f))}" media-type="{mt}"/>')
     spine = "\n".join(f'    <itemref idref="s{i:04d}"/>' for i in range(1, len(secs) + 1))
     date_line = (f'    <dc:date>{time.strftime("%Y-%m-%d")}</dc:date>' if version.startswith("2")
                  else f'    <meta property="dcterms:modified">{time.strftime("%Y-%m-%dT%H:%M:%SZ")}</meta>')
+    # 2026-10-15：EPUB2 校验规则不接受 <package> 上的 xml:lang（RSC-005），版本分流——
+    # EPUB3 保留（规范推荐），EPUB2 去掉（语言信息由 dc:language 承载，不丢）。
+    lang_attr = "" if version.startswith("2") else ' xml:lang="zh"'
     return f'''<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="uid" xml:lang="zh">
+<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="uid"{lang_attr}>
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="uid">urn:uuid:{uid}</dc:identifier>
-    <dc:title>{title}</dc:title>
+    <dc:title>{_xesc(title)}</dc:title>
     <dc:language>zh</dc:language>
 {date_line}
   </metadata>
@@ -190,7 +194,10 @@ def build_epub(epub_path, title, secs, img_srcmap, css, epub_version="3.0", img_
         z.writestr("OEBPS/content.opf", make_opf(uid, title, secs, list(img_srcmap.keys()), ver))
         if not ver.startswith("2"):
             z.writestr("OEBPS/nav.xhtml", make_nav(secs, nav_entries))
-        z.writestr("OEBPS/toc.ncx", make_ncx(uid, title, secs, nav_entries))
+        # 2026-10-15 修 NCX-001（BUG-005 修复后 epubcheck 实跑暴露的既有真 bug）：
+        # OPF 标识是 urn:uuid:<uid> 而 ncx 的 dtb:uid 只写裸 uid，epubcheck 判
+        # "NCX identifier does not match OPF identifier"——两者必须逐字一致。
+        z.writestr("OEBPS/toc.ncx", make_ncx("urn:uuid:" + uid, title, secs, nav_entries))
         z.writestr("OEBPS/styles.css", css)
         for i, (t, inner) in enumerate(secs, 1):
             def rew(m):
@@ -198,7 +205,9 @@ def build_epub(epub_path, title, secs, img_srcmap, css, epub_version="3.0", img_
                 name = os.path.basename(unquote(m.group(1)))
                 return f'src="../images/{renames.get(name, name)}"'
             inner2 = re.sub(r'src="([^"]+)"', rew, inner)
-            z.writestr(f"OEBPS/sections/section{i:04d}.xhtml", make_xhtml_doc(t, inner2))
+            # 2026-10-15：img 补 alt=""（epubcheck RSC-005 要求；LO 产出的 img 一律无 alt）
+            inner2 = re.sub(r'<img(?![^>]*\salt=)([^>]*?)/?>', r'<img alt=""\1/>', inner2)
+            z.writestr(f"OEBPS/sections/section{i:04d}.xhtml", make_xhtml_doc(t, inner2, xhtml11=ver.startswith("2")))
         for src, dst in img_srcmap.items():
             z.writestr(f"OEBPS/images/{os.path.basename(dst)}", open(src, "rb").read())
 
@@ -354,7 +363,9 @@ def accept_revisions(src, s1):
                 used = set()
                 restored = 0
                 for b in before:
-                    if b["name"] in lost_names and before.count(b) and (b["name"], b["ctx"]) not in used:
+                    # 2026-10-15 修 BUG-016：before.count(b) 是 dict 相等计数，b 自身恒 ≥1，
+                    # 守卫恒真形同虚设；真正的去重本就是下面的 (name, ctx) used 集合。
+                    if b["name"] in lost_names and (b["name"], b["ctx"]) not in used:
                         used.add((b["name"], b["ctx"]))
                         restored += _reinsert_lost_shape(doc, b, s1)
                 print(f"  [accept] 警告：接受修订连带删除 {len(lost_names)} 个浮动图"
@@ -406,12 +417,14 @@ def stage1(src, wd, cfg):
             # L1/L2 闸门必挂），但 mtime 比 src 新——下轮照样命中，降级结果被接力固化。
             # 缓存命中前先查 snap_err：降级缓存一律作废重做（现场文件保留供排查）。
             degraded = bool(jinfo.get("snap_err"))
-            if not degraded:
+            # 2026-10-15 修 BUG-003：stale 此前只算不用（10-12 落成死代码），源文件改完
+            # 重转照命中旧 s4_。新鲜度与降级一票否决，任一命中即作废。
+            if not degraded and not stale:
                 return cached, jinfo
-        if not degraded:
-            print("  [stage1] 缓存 s4_ 比源文件旧（源已修改）→ 作废重做", flush=True)
-        else:
+        if degraded:
             print("  [stage1] 缓存 s4_ 来自降级回落（上次 snap 失败）→ 作废重做", flush=True)
+        else:
+            print("  [stage1] 缓存 s4_ 比源文件旧（源已修改）→ 作废重做", flush=True)
         for dead in (cached, jpath):
             if os.path.exists(dead):
                 os.remove(dead)
@@ -496,13 +509,16 @@ def stage2(conv_src, wd, cfg):
     os.makedirs(s2, exist_ok=True)
     hit = [f for f in os.listdir(s2) if f.endswith(".html")]
     if hit:
-        hp = os.path.join(s2, hit[0])
+        # 2026-10-15 修 BUG-019：旧实现只删 hit[0]——listdir 顺序不定，残留的其它 HTML
+        # 下轮又被 hit[0] 命中，陈货照用。改取最新 HTML 判新鲜度，作废时删净全部。
+        hp = os.path.join(s2, max(hit, key=lambda f: os.path.getmtime(os.path.join(s2, f))))
         # 2026-10-10 修缓存永不过期事故：stage1 截图手术重跑后 conv_src 变新，
         # 旧 HTML 仍被复用（智慧政法看板错位查了半天其实是陈货）。
         # 规则：HTML 比 conv_src 旧（留 2s 容忍文件系统时间精度）→ 作废重转。
         if os.path.getmtime(hp) >= os.path.getmtime(conv_src) - 2:
             return hp, True
-        os.remove(hp)
+        for f in hit:
+            os.remove(os.path.join(s2, f))
         print("  [stage2] 缓存 HTML 比 stage1 产物旧 → 作废重转", flush=True)
     htm = lo_convert(conv_src, s2, _loprof(wd))
     return htm, False
@@ -657,7 +673,11 @@ def stage3(htm, wd, epub_path, unpack_dir, book_id, cfg, numbering_map=None):
         # 只改名腾位，绝不 rmtree（沙箱批量删除钩子会整进程强杀，后台批跑的全军覆没真凶）
         try:
             if os.path.exists(old):
-                os.rename(old, old + "2")
+                # 2026-10-15 修 BUG-018：旧实现硬编码 _旧2，二次残留时 rename 必失败被
+                # 静默吞掉→新解包混进旧文件，L1/L2 拿旧文本当基线。改级联避让。
+                k = 2
+                while os.path.exists(f"{old}{k}"): k += 1
+                os.rename(old, f"{old}{k}")
             os.rename(updir, old)
         except OSError:
             pass
@@ -695,8 +715,19 @@ def gate_l1l2(src, updir, cfg):
 
 def gate_epubcheck(epub, cfg):
     if not cfg["gates"].get("epubcheck"): return None
-    jar = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "work", "epubcheck", "epubcheck-5.2.1", "epubcheck.jar")
-    r = subprocess.run(["java", "-jar", jar, epub], capture_output=True, timeout=300)
+    # 2026-10-15 修 BUG-005：tools/ → app/ → 项目根，此前只上跳一级拼成 app/work/epubcheck，
+    # jar 实际在项目根 work/epubcheck/——路径错时 java 报 Unable to access jarfile，
+    # 正则不匹配返回 raw 垃圾，闸门静默失效；另补 jar 存在性与 java 缺失的优雅跳过。
+    jar = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "..", "..", "work", "epubcheck", "epubcheck-5.2.1", "epubcheck.jar"))
+    if not os.path.exists(jar):
+        return dict(raw=f"epubcheck.jar 不存在: {jar}")
+    try:
+        r = subprocess.run(["java", "-jar", jar, epub], capture_output=True, timeout=300)
+    except FileNotFoundError:
+        return dict(raw="java 不在 PATH，epubcheck 跳过")
+    except subprocess.TimeoutExpired:
+        return dict(raw="epubcheck 超时 300s")
     out = (r.stdout + r.stderr).decode("utf-8", "ignore")
     m = re.search(r"Messages:\s*(\d+) fatals? / (\d+) errors? / (\d+) warnings?", out)
     return dict(fatal=int(m.group(1)), err=int(m.group(2)), warn=int(m.group(3))) if m else dict(raw=out[-300:])
@@ -798,10 +829,34 @@ def cmd_check(args):
     cands = [f for f in os.listdir(args.dir) if f.lower().endswith((".docx", ".docm"))]
     if cands: src = os.path.join(args.dir, cands[0])
     if src is None:
-        print("输出目录中无源 docx，无法跑 L1/L2（.doc/.rtf 走 V-2 口径）"); return
+        # 2026-10-15 修 BUG-011（下半）：10-10 拍板"成功即清中间产物"后输出目录里没有
+        # 源 docx 副本，check 无源可判。从 manifest 按产物路径反查源文件（取最新一条）。
+        mf = os.path.join(os.getcwd(), "work", "pipeline", "manifest.jsonl")
+        if os.path.exists(mf):
+            adir = os.path.abspath(args.dir)
+            hit = None
+            for ln in open(mf, encoding="utf-8").read().strip().splitlines():
+                try: rec = json.loads(ln)
+                except Exception: continue
+                epub = os.path.abspath(rec.get("epub") or rec.get("out_dir") or "")
+                if epub.startswith(adir) and os.path.exists(rec.get("src") or ""):
+                    hit = rec   # 不 break：取时间戳最新的
+            if hit:
+                src = hit["src"]
+                print(f"  [check] 输出目录无源文件，从 manifest 反查：{src}")
+    if src is None:
+        print("输出目录中无源 docx，manifest 中也查不到，无法跑 L1/L2（.doc/.rtf 走 V-2 口径）"); return
     updir = os.path.join(args.dir, "epub解包")
-    g = gate_l1l2(src, updir, cfg)
     epub = [f for f in os.listdir(args.dir) if f.endswith(".epub")]
+    # 2026-10-15 修 BUG-011：10-10 拍板"成功即清中间产物"后解包区已不存在，check 无
+    # 解包可判直接空跑/崩。按需从成品 EPUB 临时解包（只读校验行为，不动产物本体）。
+    if not os.path.isdir(updir) and epub:
+        try:
+            with zipfile.ZipFile(os.path.join(args.dir, epub[0])) as z:
+                z.extractall(updir)
+        except Exception as e:
+            print(f"解包 {epub[0]} 失败：{e}"); return
+    g = gate_l1l2(src, updir, cfg)
     ec = gate_epubcheck(os.path.join(args.dir, epub[0]), {**cfg, "gates": {**cfg["gates"], "epubcheck": True}}) if epub else None
     print(json.dumps(dict(l1l2=g, epubcheck=ec), ensure_ascii=False))
 
